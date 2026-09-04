@@ -202,7 +202,7 @@ def _validate_path(path):
     """校验路径格式，返回 (entity_type, display_name, project_name)。
 
     UUID 主键后，路径中的名字是显示名（title/name），不是 DB 主键。
-    调用方需通过 _resolve_entity_id 解析为 UUID。
+    调用方需自行解析为 UUID（通过 _resolve_entity_id）。
     """
     m = TASK_RE.match(path or '')
     if m:
@@ -332,17 +332,10 @@ def set_property(path, field, value, if_version=None, changed_by=''):
         
         conn = _wb_conn()
         try:
-            # 解析显示名为 UUID
-            resolved_id = _resolve_entity_id(conn, entity_type, entity_id, project_id)
-            if not resolved_id:
-                return {'ok': False, 'error': f'{entity_type} not found: {entity_id}'}
-            entity_id = resolved_id
-            
-            # 获取当前行
-            table = 'tasks' if entity_type == 'task' else 'projects'
-            row = conn.execute(f'SELECT * FROM {table} WHERE id=?', (entity_id,)).fetchone()
+            row = _get_entity(conn, entity_type, entity_id)
             if not row:
                 return {'ok': False, 'error': f'{entity_type} not found: {entity_id}'}
+            entity_id = row['id']  # 统一使用真实 id（路径里可能是 title）
             if if_version is not None and (row['version'] or 1) != int(if_version):
                 return {'ok': False, 'error': 'VERSION_CONFLICT', 'current_version': row['version'] or 1}
             
@@ -397,21 +390,15 @@ def update_section(path, section, text, if_version=None, changed_by=''):
         
         conn = _wb_conn()
         try:
-            # 解析显示名为 UUID
-            resolved_id = _resolve_entity_id(conn, entity_type, entity_id, project_id)
-            if not resolved_id:
-                return {'ok': False, 'error': f'{entity_type} not found: {entity_id}'}
-            entity_id = resolved_id
-            
-            # 获取当前行用于版本校验和旧值记录
-            table = 'tasks' if entity_type == 'task' else 'projects'
-            row = conn.execute(f'SELECT * FROM {table} WHERE id=?', (entity_id,)).fetchone()
+            row = _get_entity(conn, entity_type, entity_id)
             if not row:
                 return {'ok': False, 'error': f'{entity_type} not found: {entity_id}'}
+            entity_id = row['id']  # 统一使用真实 id（路径里可能是 title）
             if if_version is not None and (row['version'] or 1) != int(if_version):
                 return {'ok': False, 'error': 'VERSION_CONFLICT', 'current_version': row['version'] or 1}
             
             old = row[field]
+            table = 'tasks' if entity_type == 'task' else 'projects'
             conn.execute(f'UPDATE {table} SET {field}=? WHERE id=?', (text, entity_id))
             _log_change(entity_type, entity_id, field, old, text, changed_by)
             v = _bump_version(conn, entity_type, entity_id, changed_by)
@@ -450,16 +437,10 @@ def toggle_ac(path, idx, changed_by=''):
         
         conn = _wb_conn()
         try:
-            # 解析显示名为 UUID
-            resolved_id = _resolve_entity_id(conn, 'task', entity_id, project_id)
-            if not resolved_id:
-                return {'ok': False, 'error': f'task not found: {entity_id}'}
-            entity_id = resolved_id
-            
-            # 获取当前行
-            row = conn.execute('SELECT * FROM tasks WHERE id=?', (entity_id,)).fetchone()
+            row = _get_entity(conn, 'task', entity_id)
             if not row:
                 return {'ok': False, 'error': f'task not found: {entity_id}'}
+            entity_id = row['id']  # 统一使用真实 id（路径里可能是 title）
             
             lines = (row['acceptance'] or '').split('\n')
             n = 0
@@ -526,10 +507,11 @@ def add_log(path, text, changed_by=''):
         
         conn = _wb_conn()
         try:
-            # 解析显示名为 UUID
-            entity_id = _resolve_entity_id(conn, 'task', entity_id, project_id)
-            if not entity_id:
+            # 检查任务存在（按 id 或 title 查找）
+            row = _get_entity(conn, 'task', entity_id)
+            if not row:
                 return {'ok': False, 'error': f'task not found: {entity_id}'}
+            entity_id = row['id']  # 使用真实 id（路径里可能是 title）
             
             # 插入 log_entries
             entry_id = entry.get('id') or f"{int(time.time())}"
@@ -680,33 +662,23 @@ def _parse_yaml_entry(text):
     return entry
 
 
-def _validate_sids(sids, max_retries=3):
-    """校验 session ID 是否真实存在于 state.db。
-
-    对于刚创建的 session，state.db 可能还没落库，支持重试。
-    """
+def _validate_sids(sids):
+    """校验 session ID 是否真实存在于 state.db。"""
     if not sids:
         return None
     state_db = os.path.join(os.path.expanduser('~'), '.hermes/profiles/business_analysis/state.db')
     if not os.path.exists(state_db):
         return None  # state.db 不存在，跳过校验
-    
-    dead = None
-    for attempt in range(max_retries):
-        try:
-            conn = sqlite3.connect(state_db)
-            placeholders = ','.join('?' for _ in sids)
-            rows = conn.execute(f'SELECT id FROM sessions WHERE id IN ({placeholders})', list(sids)).fetchall()
-            conn.close()
-            live = {r[0] for r in rows}
-            dead = [s for s in sids if s not in live]
-            if not dead:
-                return None  # 全部有效
-            if attempt < max_retries - 1:
-                time.sleep(0.1 * (attempt + 1))  # 递增延迟：100ms, 200ms, 300ms
-        except Exception:
-            return None
-    return dead  # 重试后仍无效
+    try:
+        conn = sqlite3.connect(state_db)
+        placeholders = ','.join('?' for _ in sids)
+        rows = conn.execute(f'SELECT id FROM sessions WHERE id IN ({placeholders})', list(sids)).fetchall()
+        conn.close()
+        live = {r[0] for r in rows}
+        dead = [s for s in sids if s not in live]
+        return dead or None
+    except Exception:
+        return None
 
 
 def link_session(task_path=None, project_path=None, sid='', source='plugin', changed_by=''):
@@ -722,14 +694,12 @@ def link_session(task_path=None, project_path=None, sid='', source='plugin', cha
         m = TASK_RE.match(task_path)
         if not m:
             return {'ok': False, 'error': f'bad task_path: {task_path[:120]}'}
-        entity_type, entity_id = 'task', m.group(2)  # title
-        project_name = m.group(1)
+        entity_type, entity_id = 'task', m.group(2)
     elif project_path:
         m = PROJ_RE.match(project_path)
         if not m:
             return {'ok': False, 'error': f'bad project_path: {project_path[:120]}'}
-        entity_type, entity_id = 'project', m.group(1)  # name
-        project_name = None
+        entity_type, entity_id = 'project', m.group(1)
     else:
         return {'ok': False, 'error': 'task_path or project_path required'}
     
@@ -742,11 +712,11 @@ def link_session(task_path=None, project_path=None, sid='', source='plugin', cha
     
     conn = _wb_conn()
     try:
-        # 解析显示名为 UUID
-        resolved_id = _resolve_entity_id(conn, entity_type, entity_id, project_name)
-        if not resolved_id:
+        # 解析真实 id（路径里可能是 title）
+        row = _get_entity(conn, entity_type, entity_id)
+        if not row:
             return {'ok': False, 'error': f'{entity_type} not found: {entity_id}'}
-        entity_id = resolved_id
+        entity_id = row['id']
         
         now = int(time.time())
         added = []
@@ -789,20 +759,20 @@ def create_task(project_id, title, goal='', task_detail='', acceptance='', prior
         dict: {'ok': True, 'task_id': str} 或 {'ok': False, 'error': str}
     """
     try:
-        # 校验项目存在（支持 id 或 name 双路查找，与 _get_entity 一致）
+        # 校验项目存在
         conn = _wb_conn()
         try:
             proj = conn.execute('SELECT id FROM projects WHERE id=?', (project_id,)).fetchone()
             if not proj:
-                proj = conn.execute('SELECT id FROM projects WHERE name=?', (project_id,)).fetchone()
-            if not proj:
                 return {'ok': False, 'error': f'项目不存在: {project_id}'}
-            project_id = proj['id']  # 归一化为真实 id
-
-            # 生成 UUID 主键（与 title 解耦）
-            import uuid
-            task_id = uuid.uuid4().hex[:12]
-
+            
+            # 任务 ID = 标题（去重：加时间戳后缀）
+            task_id = title
+            existing = conn.execute('SELECT id FROM tasks WHERE id=?', (task_id,)).fetchone()
+            if existing:
+                # 重名：加时间戳后缀
+                task_id = f'{title}_{int(time.time())}'
+            
             # 日期转换
             start_ts = _date_to_ts(start) if start else None
             due_ts = _date_to_ts(due) if due else None
@@ -1184,45 +1154,41 @@ def create_project(dir_path, project_content, agents_content, changed_by=''):
     """
     # 从路径提取项目名
     folder_name = dir_path.rstrip('/').split('/')[-1]
-
-    # 校验项目名称唯一性（按 name 查，id 是 UUID）
+    
+    # 校验项目名称唯一性
     conn = _wb_conn()
     try:
-        existing = conn.execute('SELECT id FROM projects WHERE name=?', (folder_name,)).fetchone()
+        existing = conn.execute('SELECT id FROM projects WHERE id=?', (folder_name,)).fetchone()
         if existing:
             return {'ok': False, 'error': f'项目已存在: {folder_name}'}
-
+        
         # 从 project_content 解析字段（frontmatter）
         fields = _parse_frontmatter(project_content)
-
-        # 生成 UUID 主键
-        import uuid
-        project_id = uuid.uuid4().hex[:12]
-
-        # 插入 DB（id=UUID，name=显示名）
+        
+        # 插入 DB
         now = int(time.time())
         conn.execute(
-            'INSERT INTO projects(id, name, status, background, goal, created_at, updated_at, version) VALUES(?,?,?,?,?,?,?,?)',
-            (project_id, fields.get('title', folder_name), fields.get('status', 'open'),
-             fields.get('background', ''), fields.get('goal', ''),
-             now, now, 1)
+            'INSERT INTO projects(id, name, status, start, due, complete, created_at, updated_at, version, background, goal) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+            (folder_name, fields.get('title', folder_name), fields.get('status', 'open'),
+             fields.get('start', ''), fields.get('due', ''), fields.get('complete', ''),
+             now, now, 1, fields.get('background', ''), fields.get('goal', ''))
         )
-        _log_change('project', project_id, 'created', None, folder_name, changed_by)
+        _log_change('project', folder_name, 'created', None, folder_name, changed_by)
         conn.commit()
-
+        
         # 创建目录结构（文件系统）
         _create_project_dirs(dir_path)
-
+        
         # 触发渲染（生成项目说明.md 和 AGENTS.md）
-        _trigger_render('project', project_id)
-
+        _trigger_render('project', folder_name)
+        
         # AGENTS.md 单独写（不属于 DB 投影）
         agents_path = os.path.join(VAULT, dir_path, 'AGENTS.md')
         _write_file_direct(agents_path, agents_content)
-
-        _log_op(changed_by or 'plugin', 'create_project', 'project', project_id, f'创建项目「{folder_name}」')
-
-        return {'ok': True, 'project_id': project_id}
+        
+        _log_op(changed_by or 'plugin', 'create_project', 'project', folder_name, f'创建项目「{folder_name}」')
+        
+        return {'ok': True, 'project_id': folder_name}
     finally:
         conn.close()
 
@@ -1262,50 +1228,33 @@ def delete_project(path, changed_by=''):
     """删除项目（DB 先行，文件目录一并清理）。
 
     Args:
-        path: 项目说明文档路径、项目目录路径、或项目 UUID
+        path: 项目说明文档路径（如 '2. Project/2.1 Project/XX/项目说明-XX.md'）
+              或项目目录路径（如 '2. Project/2.1 Project/XX'）
         changed_by: 变更来源
 
     Returns:
-        dict: {'ok': True, 'deleted_tasks': int} 或 {'ok': False, 'error': str}
+        dict: {'ok': True} 或 {'ok': False, 'error': str}
     """
     import shutil
     try:
-        # 解析 project_id：支持 UUID 或名称
+        # 从路径提取项目名
         p = (path or '').rstrip('/')
-        project_id = None
-        project_name = ''
-
-        # 1. 尝试作为 UUID 直接匹配
-        conn = _wb_conn()
-        try:
-            row = conn.execute('SELECT id, name FROM projects WHERE id=?', (p,)).fetchone()
-            if row:
-                project_id = row['id']
-                project_name = row['name']
-        finally:
-            conn.close()
-
-        # 2. 从路径提取名称，按 name 查
+        if '/项目说明-' in p:
+            project_id = p.split('/')[-2] if p.count('/') >= 1 else ''
+            # 兼容 '.../XX/项目说明-XX.md' → 取倒数第二段
+            parts = p.split('/')
+            project_id = parts[-2] if len(parts) >= 2 else ''
+        else:
+            project_id = p.split('/')[-1]
         if not project_id:
-            if '/项目说明-' in p:
-                project_name = p.split('/')[-2] if p.count('/') >= 1 else ''
-            else:
-                project_name = p.split('/')[-1]
-            if not project_name:
-                return {'ok': False, 'error': f'bad project path: {path[:120]}'}
-            conn = _wb_conn()
-            try:
-                row = conn.execute('SELECT id, name FROM projects WHERE name=?', (project_name,)).fetchone()
-                if not row:
-                    return {'ok': False, 'error': f'project not found: {project_name}'}
-                project_id = row['id']
-                project_name = row['name']
-            finally:
-                conn.close()
+            return {'ok': False, 'error': f'bad project path: {path[:120]}'}
 
-        # 删除 DB 记录
         conn = _wb_conn()
         try:
+            row = _get_entity(conn, 'project', project_id)
+            if not row:
+                return {'ok': False, 'error': f'project not found: {project_id}'}
+
             # 项目下任务一并删除（含关联）
             task_ids = [r['id'] for r in conn.execute('SELECT id FROM tasks WHERE project_id=?', (project_id,)).fetchall()]
             for tid in task_ids:
@@ -1321,21 +1270,21 @@ def delete_project(path, changed_by=''):
             conn.execute('DELETE FROM documents WHERE entity_type=? AND entity_id=?', ('project', project_id))
             conn.execute('DELETE FROM projects WHERE id=?', (project_id,))
 
-            _log_change('project', project_id, 'deleted', project_name, None, changed_by)
+            _log_change('project', project_id, 'deleted', row['name'] if isinstance(row, dict) or hasattr(row, 'keys') else project_id, None, changed_by)
             conn.commit()
+
+            # 删除目录（含全部文件）
+            proj_dir = os.path.join(VAULT, PROOT, project_id)
+            if os.path.isdir(proj_dir):
+                try:
+                    shutil.rmtree(proj_dir)
+                except Exception:
+                    pass  # 文件删除失败不阻塞
+
+            _log_op(changed_by or 'plugin', 'delete_project', 'project', project_id, f'删除项目「{project_id}」（含 {len(task_ids)} 个任务）')
+            return {'ok': True, 'deleted_tasks': len(task_ids)}
         finally:
             conn.close()
-
-        # 删除目录（含全部文件）——用名称定位
-        proj_dir = os.path.join(VAULT, PROOT, project_name)
-        if os.path.isdir(proj_dir):
-            try:
-                shutil.rmtree(proj_dir)
-            except Exception:
-                pass  # 文件删除失败不阻塞
-
-        _log_op(changed_by or 'plugin', 'delete_project', 'project', project_id, f'删除项目「{project_name}」（含 {len(task_ids)} 个任务）')
-        return {'ok': True, 'deleted_tasks': len(task_ids)}
     except Exception as e:
         return {'ok': False, 'error': f'{type(e).__name__}: {e}'}
 
