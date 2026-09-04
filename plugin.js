@@ -622,6 +622,12 @@ function useReducer(initialView) {
       var tasks = r.tasks || []
       setPs(r.projects || []); setTs(tasks); pollKanban(tasks)
       autoStartFlow(tasks)
+      // 同步更新 dw：如果当前显示的任务在列表中，用最新数据替换（确保 path 等字段最新）
+      var cur = dw[0]
+      if (cur && cur.id) {
+        var found = tasks.find(function(x) { return x.id === cur.id })
+        if (found) setDw(found)
+      }
     })
       .catch(function(e) { setErr(friendlyErr(e)); setLoading(false) })
       .finally(function() { setLoading(false) })
@@ -1042,10 +1048,14 @@ function useReducer(initialView) {
       // 更新 UI 状态：title + path（若文件名变了）
       var updated = Object.assign({}, t, { title: nt })
       if (r && r.path) updated.path = r.path
+      // 关键：更新 dw 为改名后的任务，确保第二次改名时路径正确
       setDw(updated)
       var newTs = ts[0].slice()
       for (var i = 0; i < newTs.length; i++) {
-        if (newTs[i].path === t.path) { newTs[i] = Object.assign({}, newTs[i], { title: nt }); if (r && r.path) newTs[i].path = r.path }
+        if (newTs[i].path === t.path || newTs[i].id === t.id) {
+          newTs[i] = Object.assign({}, newTs[i], { title: nt })
+          if (r && r.path) newTs[i].path = r.path
+        }
       }
       setTs(newTs)
       load()
