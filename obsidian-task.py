@@ -95,7 +95,8 @@ def main():
         
         # 路由到写核心
         if op in ('set_property', 'update_section', 'set_body', 'toggle_ac', 'add_log',
-                  'link_session', 'create_project'):
+                  'link_session', 'create_project', 'create_task', 'delete_task',
+                  'rename_task', 'repeat_next'):
             try:
                 from db_core import run_db_first
                 result = run_db_first(op, spec, if_version=if_version)
@@ -289,8 +290,23 @@ def main():
             return
         
         elif op == 'kanban_create':
-            # 转发到 kanban DB（保留现有逻辑）
-            _json_err('kanban_create: not implemented in refactor yet')
+            # 转发到 kanban DB
+            try:
+                from db_core import kanban_bridge
+                result = kanban_bridge(op, spec)
+                _json_out(result)
+            except Exception as e:
+                _json_err(f'kanban: {type(e).__name__}: {e}')
+            return
+        
+        elif op.startswith('kanban_'):
+            # 其他 kanban 操作统一走 kanban_bridge
+            try:
+                from db_core import kanban_bridge
+                result = kanban_bridge(op, spec)
+                _json_out(result)
+            except Exception as e:
+                _json_err(f'kanban: {type(e).__name__}: {e}')
             return
         
         else:

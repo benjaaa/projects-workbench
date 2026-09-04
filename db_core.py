@@ -17,6 +17,7 @@ import os
 import re
 import sqlite3
 import time
+import json
 
 # 路径常量
 VAULT = '/Users/ben/Documents/Second Brain/Second Brain'
@@ -616,18 +617,7 @@ def _validate_sids(sids):
 
 
 def link_session(task_path=None, project_path=None, sid='', source='plugin', changed_by=''):
-    """Session 关联到任务/项目（显式绑定）。
-    
-    Args:
-        task_path: 任务路径（与 project_path 二选一）
-        project_path: 项目路径
-        sid: session ID（必须真实存在于 state.db）
-        source: 来源标记
-        changed_by: 变更来源
-    
-    Returns:
-        dict: {'ok': True, 'linked': [...], 'skipped': int} 或 {'ok': False, 'error': str}
-    """
+    """Session 关联到任务/项目（显式绑定）。"""
     if not sid:
         return {'ok': False, 'error': 'no sid'}
     
@@ -635,7 +625,6 @@ def link_session(task_path=None, project_path=None, sid='', source='plugin', cha
     if not sids:
         return {'ok': False, 'error': 'no sid'}
     
-    # 解析路径
     if task_path:
         m = TASK_RE.match(task_path)
         if not m:
@@ -649,7 +638,6 @@ def link_session(task_path=None, project_path=None, sid='', source='plugin', cha
     else:
         return {'ok': False, 'error': 'task_path or project_path required'}
     
-    # sid 存活校验
     dead = _validate_sids(sids)
     if dead:
         return {'ok': False, 'error': 'INVALID_SESSION_IDS', 'invalid_sids': dead}
@@ -673,13 +661,391 @@ def link_session(task_path=None, project_path=None, sid='', source='plugin', cha
             _log_change(entity_type, entity_id, 'sessions', None, ','.join(added), changed_by)
         
         conn.commit()
-        
-        # 触发渲染（更新 session_ids frontmatter）
         _trigger_render(entity_type, entity_id)
-        
         return {'ok': True, 'linked': added, 'skipped': len(sids) - len(added)}
     finally:
         conn.close()
+
+
+def create_task(project_id, title, goal='', task_detail='', acceptance='', priority='p2', status='open', start='', due='', handler='', repeat_cfg=None, changed_by=''):
+    """创建任务（DB 先行）。
+    
+    Args:
+        project_id: 项目 ID
+        title: 任务标题
+        goal: 目标
+        task_detail: 任务详情（body）
+        acceptance: 验收标准文本
+        priority: 优先级（p0/p1/p2）
+        status: 状态
+        start: 开始日期（YYYY-MM-DD）
+        due: 截止日期（YYYY-MM-DD）
+        handler: 处理人
+        repeat_cfg: 重复配置 dict {mode, unit, every, day, anchor}
+        changed_by: 变更来源
+    
+    Returns:
+        dict: {'ok': True, 'task_id': str} 或 {'ok': False, 'error': str}
+    """
+    try:
+        # 校验项目存在
+        conn = _wb_conn()
+        try:
+            proj = conn.execute('SELECT id FROM projects WHERE id=?', (project_id,)).fetchone()
+            if not proj:
+                return {'ok': False, 'error': f'项目不存在: {project_id}'}
+            
+            # 任务 ID = 标题（去重：加时间戳后缀）
+            task_id = title
+            existing = conn.execute('SELECT id FROM tasks WHERE id=?', (task_id,)).fetchone()
+            if existing:
+                # 重名：加时间戳后缀
+                task_id = f'{title}_{int(time.time())}'
+            
+            # 日期转换
+            start_ts = _date_to_ts(start) if start else None
+            due_ts = _date_to_ts(due) if due else None
+            
+            # 重复配置
+            rep_mode = repeat_cfg.get('mode', '') if repeat_cfg else ''
+            rep_unit = repeat_cfg.get('unit', '') if repeat_cfg else ''
+            rep_every = repeat_cfg.get('every', 1) if repeat_cfg else None
+            rep_day = repeat_cfg.get('day') if repeat_cfg else None
+            rep_anchor = repeat_cfg.get('anchor', '') if repeat_cfg else ''
+            
+            now = int(time.time())
+            conn.execute('''INSERT INTO tasks(
+                id, project_id, title, status, priority, handler,
+                start, due, complete, version,
+                goal, body, acceptance,
+                repeat_mode, repeat_unit, repeat_every, repeat_day, repeat_anchor,
+                created_at, updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''', (
+                task_id, project_id, title, status, priority, handler,
+                start_ts, due_ts, None, 1,
+                goal, task_detail, acceptance,
+                rep_mode, rep_unit, rep_every, rep_day, rep_anchor,
+                now, now
+            ))
+            _log_change('task', task_id, 'created', None, task_id, changed_by)
+            conn.commit()
+            
+            # 触发渲染
+            _trigger_render('task', task_id)
+            
+            _log_op(changed_by or 'plugin', 'create_task', 'task', task_id, f'创建任务「{title}」')
+            return {'ok': True, 'task_id': task_id}
+        finally:
+            conn.close()
+    except Exception as e:
+        return {'ok': False, 'error': f'{type(e).__name__}: {e}'}
+
+
+def delete_task(path, changed_by=''):
+    """删除任务（DB 先行，文件由渲染器删除）。
+    
+    Args:
+        path: 任务路径
+        changed_by: 变更来源
+    
+    Returns:
+        dict: {'ok': True} 或 {'ok': False, 'error': str}
+    """
+    try:
+        entity_type, entity_id, project_id = _validate_path(path)
+        if entity_type != 'task':
+            return {'ok': False, 'error': 'delete_task requires task path'}
+        
+        conn = _wb_conn()
+        try:
+            row = _get_entity(conn, 'task', entity_id)
+            if not row:
+                return {'ok': False, 'error': f'task not found: {entity_id}'}
+            
+            # 删除关联数据（外键级联）
+            conn.execute('DELETE FROM task_sessions WHERE task_id=?', (entity_id,))
+            conn.execute('DELETE FROM log_sessions WHERE entry_id IN (SELECT id FROM log_entries WHERE task_id=?)', (entity_id,))
+            conn.execute('DELETE FROM log_detail WHERE entry_id IN (SELECT id FROM log_entries WHERE task_id=?)', (entity_id,))
+            conn.execute('DELETE FROM log_entries WHERE task_id=?', (entity_id,))
+            conn.execute('DELETE FROM documents WHERE entity_type=? AND entity_id=?', ('task', entity_id))
+            conn.execute('DELETE FROM tasks WHERE id=?', (entity_id,))
+            
+            _log_change('task', entity_id, 'deleted', row['title'], None, changed_by)
+            conn.commit()
+            
+            # 删除文件
+            file_path = os.path.join(VAULT, path)
+            if os.path.exists(file_path):
+                try:
+                    os.unlink(file_path)
+                except Exception:
+                    pass  # 文件删除失败不阻塞
+            
+            _log_op(changed_by or 'plugin', 'delete_task', 'task', entity_id, f'删除任务「{row["title"]}」')
+            return {'ok': True}
+        finally:
+            conn.close()
+    except Exception as e:
+        return {'ok': False, 'error': f'{type(e).__name__}: {e}'}
+
+
+def rename_task(path, new_title, changed_by=''):
+    """重命名任务（DB 先行，文件名同步更新）。
+    
+    Args:
+        path: 任务路径
+        new_title: 新标题
+        changed_by: 变更来源
+    
+    Returns:
+        dict: {'ok': True, 'new_path': str} 或 {'ok': False, 'error': str}
+    """
+    try:
+        entity_type, entity_id, project_id = _validate_path(path)
+        if entity_type != 'task':
+            return {'ok': False, 'error': 'rename_task requires task path'}
+        
+        conn = _wb_conn()
+        try:
+            row = _get_entity(conn, 'task', entity_id)
+            if not row:
+                return {'ok': False, 'error': f'task not found: {entity_id}'}
+            
+            old_title = row['title']
+            if old_title == new_title:
+                return {'ok': True, 'unchanged': True, 'db_first': True}
+            
+            # 更新 DB（title 和 id 都更新）
+            conn.execute('UPDATE tasks SET title=? WHERE id=?', (new_title, entity_id))
+            _log_change('task', entity_id, 'title', old_title, new_title, changed_by)
+            # 更新 id（文件名锚定）
+            conn.execute('UPDATE tasks SET id=? WHERE id=?', (new_title, entity_id))
+            # 更新关联表的外键
+            conn.execute('UPDATE task_sessions SET task_id=? WHERE task_id=?', (new_title, entity_id))
+            conn.execute('UPDATE log_entries SET task_id=? WHERE task_id=?', (new_title, entity_id))
+            conn.execute('UPDATE documents SET entity_id=? WHERE entity_type=? AND entity_id=?', (new_title, 'task', entity_id))
+            v = _bump_version(conn, 'task', new_title, changed_by)
+            conn.commit()
+            
+            # 触发渲染（新标题写入新文件，旧文件删除）
+            _trigger_render('task', new_title)
+            
+            # 删除旧文件
+            old_file = os.path.join(VAULT, path)
+            if os.path.exists(old_file):
+                try:
+                    os.unlink(old_file)
+                except Exception:
+                    pass
+            
+            new_path = f'{PROOT}/{project_id}/tasks/任务-{new_title}.md'
+            _log_op(changed_by or 'plugin', 'rename_task', 'task', entity_id, f'重命名：{old_title} → {new_title}')
+            return {'ok': True, 'version': v, 'new_path': new_path, 'db_first': True}
+        finally:
+            conn.close()
+    except Exception as e:
+        return {'ok': False, 'error': f'{type(e).__name__}: {e}'}
+
+
+def repeat_next(path, changed_by=''):
+    """按 repeat 规则生成下一个周期任务。
+    
+    Args:
+        path: 任务路径
+        changed_by: 变更来源
+    
+    Returns:
+        dict: {'ok': True, 'title': str, 'due': str} 或 {'ok': False, 'error': str}
+    """
+    try:
+        entity_type, entity_id, project_id = _validate_path(path)
+        if entity_type != 'task':
+            return {'ok': False, 'error': 'repeat_next requires task path'}
+        
+        conn = _wb_conn()
+        try:
+            row = _get_entity(conn, 'task', entity_id)
+            if not row:
+                return {'ok': False, 'error': f'task not found: {entity_id}'}
+            
+            # 校验重复配置
+            if row['repeat_mode'] != 'fixed' or not row['repeat_unit'] or not row['repeat_anchor']:
+                return {'ok': False, 'error': 'NO_REPEAT'}
+            
+            # 计算下一个周期
+            from datetime import datetime, timedelta
+            anchor = datetime.fromtimestamp(row['repeat_anchor']) if isinstance(row['repeat_anchor'], int) else datetime.strptime(row['repeat_anchor'], '%Y-%m-%d')
+            today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            every = row['repeat_every'] or 1
+            unit = row['repeat_unit']
+            day = row['repeat_day'] or 1
+            
+            def advance(d):
+                x = d
+                if unit == 'day':
+                    x = d + timedelta(days=every)
+                    while x <= today or x <= d:
+                        x += timedelta(days=every)
+                elif unit == 'week':
+                    wd = day if 1 <= day <= 7 else 1
+                    days_ahead = wd - x.weekday()
+                    if days_ahead <= 0:
+                        days_ahead += 7
+                    x = x + timedelta(days=days_ahead)
+                    while x <= today or x <= d:
+                        x += timedelta(weeks=every)
+                elif unit == 'month':
+                    dd = day if 1 <= day <= 31 else 1
+                    x = x.replace(day=dd)
+                    while x <= today or x <= d or x.day != dd:
+                        x = x + timedelta(days=32)
+                        x = x.replace(day=dd)
+                return x
+            
+            next_due = advance(anchor)
+            next_due_str = next_due.strftime('%Y-%m-%d')
+            
+            # 生成新任务标题（去日期后缀）
+            base_title = re.sub(r'\s+\d{4}-\d{2}-\d{2}\s*$', '', row['title']).strip()
+            new_title = f'{base_title} {next_due_str}'
+            
+            # 检查是否已存在
+            existing = conn.execute('SELECT id FROM tasks WHERE id=?', (new_title,)).fetchone()
+            if existing:
+                return {'ok': False, 'error': 'EXISTS'}
+            
+            # 创建新任务（复制原任务字段，重置状态）
+            now = int(time.time())
+            conn.execute('''INSERT INTO tasks(
+                id, project_id, title, status, priority, handler,
+                start, due, complete, version,
+                goal, body, acceptance,
+                repeat_mode, repeat_unit, repeat_every, repeat_day, repeat_anchor,
+                created_at, updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''', (
+                new_title, project_id, new_title, 'open', row['priority'], row['handler'],
+                None, _date_to_ts(next_due_str), None, 1,
+                row['goal'], row['body'], row['acceptance'],
+                row['repeat_mode'], row['repeat_unit'], row['repeat_every'], row['repeat_day'], next_due_str,
+                now, now
+            ))
+            _log_change('task', new_title, 'created', None, new_title, changed_by)
+            conn.commit()
+            
+            # 触发渲染
+            _trigger_render('task', new_title)
+            
+            _log_op(changed_by or 'plugin', 'repeat_next', 'task', new_title, f'重复任务「{base_title}」生成下一周期')
+            return {'ok': True, 'title': new_title, 'due': next_due_str}
+        finally:
+            conn.close()
+    except Exception as e:
+        return {'ok': False, 'error': f'{type(e).__name__}: {e}'}
+
+
+# ─── Kanban 集成 ─────────────────────────────────────────────
+
+def _kb_conn(board_name=None):
+    """连接 kanban DB。"""
+    import sys as _sys
+    agent_root = os.path.join(os.path.expanduser('~'), '.hermes/hermes-agent')
+    if agent_root not in _sys.path:
+        _sys.path.insert(0, agent_root)
+    from hermes_cli import kanban_db as kb
+    return kb, kb.connect(board=board_name)
+
+
+def kanban_bridge(op, spec):
+    """转发 kanban 操作到 Hermes kanban DB。"""
+    try:
+        kb, conn = _kb_conn(board_name=spec.get('board'))
+        try:
+            if op == 'kanban_create':
+                ws_path = spec.get('workspace_path') or None
+                tid = kb.create_task(
+                    conn,
+                    title=spec.get('title', ''),
+                    body=spec.get('body', '') or None,
+                    assignee=spec.get('assignee') or None,
+                    created_by='projects-workbench',
+                    workspace_kind='dir' if ws_path else 'scratch',
+                    workspace_path=ws_path,
+                    idempotency_key=spec.get('idempotency_key'),
+                )
+                return {'ok': True, 'task_id': tid}
+            if op == 'kanban_status':
+                task = kb.get_task(conn, spec.get('task_id', ''))
+                if task is None:
+                    return {'ok': False, 'error': 'task not found'}
+                return {
+                    'ok': True,
+                    'status': task.status,
+                    'title': task.title,
+                    'summary': (task.result or '')[:500],
+                }
+            if op == 'kanban_comment':
+                ok = kb.add_comment(
+                    conn, spec.get('task_id', ''),
+                    body=spec.get('body', ''),
+                    author=spec.get('author') or 'projects-workbench',
+                )
+                return {'ok': bool(ok), 'commented': True}
+            if op == 'kanban_complete':
+                ok = kb.complete_task(
+                    conn, spec.get('task_id', ''),
+                    summary=spec.get('summary') or None,
+                    metadata=spec.get('metadata'),
+                )
+                return {'ok': bool(ok), 'completed': True}
+            if op == 'kanban_reopen':
+                ok = kb.unblock_task(conn, spec.get('task_id', ''))
+                return {'ok': bool(ok), 'reopened': True}
+            if op == 'kanban_worker_session':
+                runs = conn.execute(
+                    "SELECT metadata FROM task_runs WHERE task_id = ? AND outcome = 'completed' "
+                    "ORDER BY started_at DESC LIMIT 1",
+                    (spec.get('task_id', ''),),
+                ).fetchall()
+                for row in runs:
+                    if not row or not row[0]:
+                        continue
+                    try:
+                        md = json.loads(row[0])
+                    except Exception:
+                        continue
+                    wsid = md.get('worker_session_id') or ''
+                    if wsid:
+                        return {'ok': True, 'worker_session_id': wsid}
+                return {'ok': True, 'worker_session_id': ''}
+            if op == 'kanban_link_session':
+                stask = kb.get_task(conn, spec.get('task_id', ''))
+                if not stask or not stask.workspace_path:
+                    return {'ok': False, 'error': 'task not found or no workspace_path'}
+                wsid = spec.get('worker_session_id', '')
+                if not wsid:
+                    return {'ok': False, 'error': 'no worker_session_id'}
+                sdb = os.path.join(os.path.expanduser('~'), '.hermes/profiles/business_analysis/state.db')
+                if not os.path.exists(sdb):
+                    return {'ok': False, 'error': 'state.db not found'}
+                sconn = sqlite3.connect(sdb)
+                try:
+                    sconn.execute("UPDATE sessions SET cwd = ? WHERE id = ?", (stask.workspace_path, wsid))
+                    sconn.commit()
+                    return {'ok': True, 'cwd': stask.workspace_path}
+                except Exception as _e:
+                    return {'ok': False, 'error': str(_e)[:200]}
+                finally:
+                    try: sconn.close()
+                    except Exception: pass
+            if op == 'kanban_dispatch':
+                result = kb.dispatch_once(conn, board=spec.get('board') or 'default', max_spawn=spec.get('max', 3))
+                return {'ok': True, 'spawned': len(result.spawned if hasattr(result, 'spawned') else [])}
+            return {'ok': False, 'error': 'unknown kanban op: ' + op}
+        finally:
+            try: conn.close()
+            except Exception: pass
+    except Exception as e:
+        return {'ok': False, 'error': str(e)[:300]}
 
 
 def create_project(dir_path, project_content, agents_content, changed_by=''):
@@ -826,5 +1192,26 @@ def run_db_first(op, spec, if_version=None):
         )
     elif op == 'create_project':
         return create_project(spec['dir'], spec.get('project_content', ''), spec.get('agents_content', ''), changed_by)
+    elif op == 'create_task':
+        return create_task(
+            project_id=spec.get('project_id', ''),
+            title=spec.get('title', ''),
+            goal=spec.get('goal', ''),
+            task_detail=spec.get('task_detail', ''),
+            acceptance=spec.get('acceptance', ''),
+            priority=spec.get('priority', 'p2'),
+            status=spec.get('status', 'open'),
+            start=spec.get('start', ''),
+            due=spec.get('due', ''),
+            handler=spec.get('handler', ''),
+            repeat_cfg=spec.get('repeat_cfg'),
+            changed_by=changed_by
+        )
+    elif op == 'delete_task':
+        return delete_task(spec['path'], changed_by)
+    elif op == 'rename_task':
+        return rename_task(spec['path'], spec.get('new_title', ''), changed_by)
+    elif op == 'repeat_next':
+        return repeat_next(spec['path'], changed_by)
     else:
         return {'ok': False, 'error': f'unknown op for db_first: {op}'}
