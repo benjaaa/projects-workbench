@@ -104,7 +104,7 @@ def validate_spec(spec):
         raise ValidationError("'op' is required")
 
     # 路径类操作必须有 path（create_project 用 dir，不在此列）
-    path_ops = {'write', 'write_from_tmp', 'read', 'ensure_dir', 'update_section',
+    path_ops = {'write', 'write_from_tmp', 'read', 'ensure_dir', 'update_section', 'set_body',
                 'toggle_ac', 'add_log', 'edit_log', 'edit_yaml_log', 'set_property', 'repeat_next',
                 'delete_file', 'rename_title'}
     if op in path_ops:
@@ -131,6 +131,12 @@ def validate_spec(spec):
     # kanban 操作校验
     if op.startswith('kanban_') and op != 'kanban_dispatch':
         _string_field(spec.get('task_id'), 'task_id', required=True, max_len=64)
+
+    # link_session：sid 必填，task_path/project_path 二选一
+    if op == 'link_session':
+        _string_field(spec.get('sid'), 'sid', required=True, max_len=4096)
+        if not spec.get('task_path') and not spec.get('project_path'):
+            raise ValidationError("link_session requires task_path or project_path")
 
     # 日志操作
     if op == 'add_log':
@@ -409,7 +415,12 @@ def repeat_next(path):
         'const ex=app.vault.getMarkdownFiles().find(f=>f.path===path2);'
         'if(ex)return JSON.stringify({ok:false,error:"EXISTS"});'
         'await app.vault.create(path2,fmLines+newBody);'
-        'return JSON.stringify({ok:true,due:due,path:path2,title:tTitle})})()'
+        # P2 DB 化：新实例同步进 workbench.db（tasks 行 + documents 映射 + change_log）
+        'const taskId=tTitle;'
+        'const parentId=' + json.dumps(p, ensure_ascii=False) + ';'
+        'const meta=JSON.stringify({task_id:taskId,project:(p.split("/")[3]||""),title:tTitle,status:"open",due:due,start:newStart,path:path2,base_title:baseTitle});'
+        'await app.vault.adapter.write("/tmp/hpw_repeat_next.json",meta);'
+        'return JSON.stringify({ok:true,due:due,path:path2,title:tTitle,_db_meta_file:"/tmp/hpw_repeat_next.json"})})()'
     )
     return _eval(js)
 
@@ -541,6 +552,16 @@ def update_section(path, section, text, if_version=None):
         'return JSON.stringify({ok:true})})()'
     )
     return _eval(js)
+
+def set_body(path, text, if_version=None):
+    """整段替换 ## 任务详情（body）区段。P3 body 编辑入口。
+
+    与 update_section 的区别：body 是 P2 迁移后的结构化字段（tasks.body），
+    本 op 写文件后由 write_bridge 统一同步 DB + change_log + 投影。
+    支持乐观锁 if_version。
+    """
+    return update_section(path, '任务详情', text, if_version)
+
 
 def toggle_ac(path, idx):
     p = json.dumps(path, ensure_ascii=False)
@@ -892,6 +913,29 @@ def _query_sessions(proj_dir, sid_list):
     try:
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
+        # 0) P3 DB 真相源：project_sessions 显式关联优先（写侧 link_session 落库）
+        try:
+            wb = sqlite3.connect(os.path.join(HOME, '.hermes/profiles/business_analysis/desktop-plugins/projects-workbench/workbench.db'))
+            db_sids = [r[0] for r in wb.execute('SELECT sid FROM project_sessions WHERE project_id=?', (proj_dir,)).fetchall()]
+            wb.close()
+        except Exception:
+            db_sids = []
+        for sid in db_sids:
+            if sid in seen or not sid:
+                continue
+            try:
+                r = conn.execute(
+                    '''SELECT id, title, cwd, last_activity_at, message_count,
+                       input_tokens, output_tokens, started_at, source
+                       FROM sessions WHERE id = ?''',
+                    (sid,)
+                ).fetchone()
+                if r:
+                    seen.add(sid)
+                    first_user, last_asst = _get_session_messages(conn, sid)
+                    sessions.append(_session_from_row(r, first_user, last_asst))
+            except Exception:
+                pass
         # 1) Query by cwd match
         rows = conn.execute(
             '''SELECT id, title, cwd, last_activity_at, message_count,
@@ -899,11 +943,25 @@ def _query_sessions(proj_dir, sid_list):
                FROM sessions WHERE cwd = ? OR cwd LIKE ? ORDER BY last_activity_at DESC LIMIT 50''',
             (full_cwd, full_cwd + '/%')
         ).fetchall()
+        cwd_ids = []
         for r in rows:
             sid = r['id']
             seen.add(sid)
+            cwd_ids.append(sid)
             first_user, last_asst = _get_session_messages(conn, sid)
             sessions.append(_session_from_row(r, first_user, last_asst))
+        # P3 DB 真相源：cwd 命中的会话归档进 project_sessions（替代旧 frontmatter 存档）
+        if cwd_ids:
+            try:
+                wb = sqlite3.connect(os.path.join(HOME, '.hermes/profiles/business_analysis/desktop-plugins/projects-workbench/workbench.db'))
+                import time as _t
+                for sid in cwd_ids:
+                    wb.execute('INSERT OR IGNORE INTO project_sessions(project_id,sid,linked_at,source) VALUES(?,?,?,?)',
+                               (proj_dir, sid, int(_t.time()), 'cwd'))
+                wb.commit()
+                wb.close()
+            except Exception:
+                pass
         # 2) Query by stored session IDs (not already found by cwd)
         for sid in session_ids:
             if sid in seen or not sid:
@@ -967,6 +1025,67 @@ def _session_from_row(r, first_user='', last_asst=''):
 
 # ─── 主入口 ─────────────────────────────────────────────
 
+def link_session_op(spec):
+    """P3 DB 真相源：session ↔ 任务/项目 映射直接写 workbench.db。
+
+    frontmatter session_ids 写入通道退役（Ben 2026-09-05）：发起会话时由
+    plugin.js 调本 op 建立 task_sessions/project_sessions 映射；读取侧
+    （read_bridge/ops_session_by_ids/recent_sessions）均以 DB 为准。
+    sid 必须真实存在于 state.db（结构性拦截无效引用）。"""
+    import sqlite3
+    import time as _time
+    sids = [s.strip() for s in str(spec.get('sid', '')).split(',') if s.strip()]
+    if not sids:
+        return {'ok': False, 'error': 'no sid'}
+    task_path = spec.get('task_path', '')
+    project_path = spec.get('project_path', '')
+    if task_path:
+        m = re.match(r'^2\. Project/2\.1 Project/([^/]+)/tasks/任务-(.+)\.md$', task_path)
+        if not m:
+            return {'ok': False, 'error': 'bad task_path: ' + task_path[:120]}
+        entity_type, entity_id = 'task', m.group(2)
+    elif project_path:
+        m = re.match(r'^2\. Project/2\.1 Project/([^/]+)/项目说明-', project_path)
+        if not m:
+            return {'ok': False, 'error': 'bad project_path: ' + project_path[:120]}
+        entity_type, entity_id = 'project', m.group(1)
+    else:
+        return {'ok': False, 'error': 'task_path or project_path required'}
+    # sid 存活校验（state.db sessions 表）
+    try:
+        sconn = sqlite3.connect(os.path.join(HOME, '.hermes/profiles/business_analysis/state.db'))
+        live = {r[0] for r in sconn.execute('SELECT id FROM sessions').fetchall()}
+        sconn.close()
+    except Exception as e:
+        return {'ok': False, 'error': 'state.db: ' + str(e)[:150]}
+    dead = [s for s in sids if s not in live]
+    if dead:
+        return {'ok': False, 'error': 'INVALID_SESSION_IDS', 'invalid_sids': dead}
+    table = 'task_sessions' if entity_type == 'task' else 'project_sessions'
+    col = 'task_id' if entity_type == 'task' else 'project_id'
+    wb_path = os.path.join(HOME, '.hermes/profiles/business_analysis/desktop-plugins/projects-workbench/workbench.db')
+    conn = sqlite3.connect(wb_path)
+    try:
+        now = int(_time.time())
+        added = []
+        for sid in sids:
+            cur = conn.execute(
+                'INSERT OR IGNORE INTO ' + table + '(' + col + ',sid,linked_at,source) VALUES(?,?,?,?)',
+                (entity_id, sid, now, spec.get('source') or 'plugin:create'))
+            if cur.rowcount:
+                added.append(sid)
+        if added:
+            conn.execute(
+                "INSERT INTO change_log(entity_type,entity_id,field,old_value,new_value,changed_at,changed_by) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (entity_type, entity_id, 'sessions', None, ','.join(added), now,
+                 spec.get('changed_by') or ('op:link_session:' + (spec.get('source') or ''))))
+        conn.commit()
+        return {'ok': True, 'linked': added, 'skipped': len(sids) - len(added)}
+    finally:
+        conn.close()
+
+
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else 'all'
 
@@ -988,6 +1107,16 @@ def main():
         except ValidationError as e:
             print(json.dumps({'ok': False, 'error': str(e)}, ensure_ascii=False)); return
 
+        # TRACE: UI 保存链路取证（临时，定位保存失败后移除）
+        try:
+            with open('/tmp/hpw_trace.log', 'a', encoding='utf-8') as _tf:
+                _tf.write(json.dumps({'t': time.strftime('%H:%M:%S'), 'op': op,
+                                      'path': spec.get('path', ''), 'keys': sorted(spec.keys()),
+                                      'entry_id': spec.get('entry_id', ''),
+                                      'new_yaml_len': len(spec.get('new_yaml_text', ''))}, ensure_ascii=False) + '\n')
+        except Exception:
+            pass
+
         # 乐观锁参数提取
         if_version = spec.get('if_version')
 
@@ -995,6 +1124,15 @@ def main():
             result = write_file(spec['path'], spec['content'])
         elif op == 'write_from_tmp':
             result = write_file_from_tmp(spec['path'], spec['tmp_path'])
+        elif op in ('set_property', 'add_log', 'edit_log', 'toggle_ac',
+                    'update_section', 'set_body'):
+            # P3 执行主体反转（Ben 拍板）：DB 是唯一真相源，写 op 直写 DB →
+            # 投影渲染文件。文件不参与写入链，也不再反向解析。
+            try:
+                from db_ops import run_db_first
+                result = run_db_first(op, spec, if_version=if_version)
+            except Exception as _db_ops_err:
+                result = {'ok': False, 'error': f'db_first: {type(_db_ops_err).__name__}: {_db_ops_err}'}
         elif op == 'edit_yaml_log':
             result = edit_yaml_log(spec['path'], spec['entry_id'], spec['new_yaml_text'])
         elif op == 'delete_file':
@@ -1011,16 +1149,31 @@ def main():
             result = create_project(spec['dir'], spec['project_content'], spec['agents_content'])
         elif op == 'update_section':
             result = update_section(spec['path'], spec['section'], spec['text'], if_version=if_version)
+        elif op == 'set_body':
+            result = set_body(spec['path'], spec['text'], if_version=if_version)
         elif op == 'toggle_ac':
             result = toggle_ac(spec['path'], int(spec['idx']))
         elif op == 'add_log':
+            # sid 前置校验：YAML 条目引用的 session 必须真实存在（P2 写入收口）
+            _txt = spec.get('text', '')
+            if _txt.startswith('- date:'):
+                import re as _re
+                from write_bridge import validate_sids as _vs
+                _dead = _vs(_re.findall(r'^\s+- id:\s*(\S+)', _txt, _re.M))
+                if _dead:
+                    print(json.dumps({'ok': False, 'error': 'INVALID_SESSION_IDS',
+                                      'detail': '以下 sid 不存在于 state.db，请先 task_ops link 或修正: ' + str(_dead),
+                                      'invalid_sids': _dead}, ensure_ascii=False)); return
             result = add_log(spec['path'], spec['text'])
         elif op == 'edit_log':
             result = edit_log(spec['path'], spec['idx'], spec['text'])
         elif op == 'set_property':
             result = set_property(spec['path'], spec['field'], spec['value'], if_version=if_version)
+        elif op == 'link_session':
+            result = link_session_op(spec)
         elif op.startswith('kanban_'):
             result = kanban_bridge(op, spec)
+
         elif op == 'ops_log':
             result = add_log_op(spec.get('project', ''), spec.get('task', ''), spec.get('action', ''), spec.get('detail', ''))
         elif op == 'ops_query':
@@ -1127,41 +1280,26 @@ def main():
                        ORDER BY COALESCE(last_activity_at, started_at) DESC LIMIT ?''',
                     (limit,)
                 ).fetchall()
-                # 反查每个 session 关联的 project/issue：扫描项目目录下所有任务的 session_ids frontmatter
-                proj_root = os.path.join(VAULT, PROJ_DIR)
-                sid_to_link = {}  # session_id -> {project, issue_title, issue_path, issue_dir}
+                # P3 DB 真相源：关联反查走 workbench.db（task_sessions/project_sessions，frontmatter 扫描退役）
+                sid_to_link = {}  # session_id -> {project, issue_title, issue_path}
                 try:
-                    if os.path.isdir(proj_root):
-                        for pname in os.listdir(proj_root):
-                            pdir = os.path.join(proj_root, pname)
-                            if not os.path.isdir(pdir):
-                                continue
-                            tasks_dir = os.path.join(pdir, 'tasks')
-                            if not os.path.isdir(tasks_dir):
-                                continue
-                            for fname in os.listdir(tasks_dir):
-                                if not fname.endswith('.md'):
-                                    continue
-                                tpath = os.path.join(tasks_dir, fname)
-                                try:
-                                    with open(tpath, encoding='utf-8') as f:
-                                        head = f.read(1200)
-                                except Exception:
-                                    continue
-                                import re as _re
-                                m = _re.search(r'session_ids:\s*(.+)', head)
-                                if not m:
-                                    continue
-                                for sid2 in [x.strip() for x in m.group(1).split(',') if x.strip()]:
-                                    if sid2 not in sid_to_link:
-                                        title = fname[:-3]
-                                        if title.startswith('任务-'):
-                                            title = title[3:]
-                                        sid_to_link[sid2] = {
-                                            'project': pname,
-                                            'issue_title': title,
-                                            'issue_path': os.path.join(PROJ_DIR, pname, 'tasks', fname),
-                                        }
+                    wb = sqlite3.connect(os.path.join(HOME, '.hermes/profiles/business_analysis/desktop-plugins/projects-workbench/workbench.db'))
+                    wb.row_factory = sqlite3.Row
+                    for r2 in wb.execute(
+                        '''SELECT ts.sid AS sid, t.id AS tid, t.title AS ttitle, p.id AS pid, p.name AS pname
+                           FROM task_sessions ts JOIN tasks t ON t.id = ts.task_id
+                           JOIN projects p ON p.id = t.project_id'''):
+                        sid_to_link[r2['sid']] = {
+                            'project': r2['pname'],
+                            'issue_title': r2['ttitle'] or '',
+                            'issue_path': os.path.join(PROJ_DIR, r2['pid'], 'tasks', '任务-' + r2['tid'] + '.md'),
+                        }
+                    for r2 in wb.execute(
+                        '''SELECT ps.sid AS sid, p.name AS pname
+                           FROM project_sessions ps JOIN projects p ON p.id = ps.project_id'''):
+                        if r2['sid'] not in sid_to_link:
+                            sid_to_link[r2['sid']] = {'project': r2['pname'], 'issue_title': '', 'issue_path': ''}
+                    wb.close()
                 except Exception:
                     pass
                 for r in rows:
@@ -1268,6 +1406,18 @@ def main():
                 result = {'ok': False, 'error': (rj or {}).get('error', 'create failed')}
         else:
             result = {'ok': False, 'error': 'unknown op: ' + op}
+
+        # ── P2 写入收口：写 op 统一挂接（DB同步+change_log+sid校验+投影）──
+        WRITE_OPS = ('set_property', 'add_log', 'edit_log', 'edit_yaml_log',
+                     'toggle_ac', 'update_section', 'set_body', 'repeat_next', 'rename_title',
+                     'write', 'write_from_tmp')
+        if result.get('ok') and op in WRITE_OPS and spec.get('path') \
+                and not result.get('db_first'):
+            try:
+                from write_bridge import after_write_op
+                result = after_write_op(op, spec, result, changed_by=spec.get('changed_by', ''))
+            except Exception as _pw_err:
+                result['projection_warning'] = f'{type(_pw_err).__name__}: {_pw_err}'
         # 大输出自动分片：超过 3000 字符时写临时文件，输出分片元信息，避免 Hermes shell.exec 截断
         # write/set_property 等小结果也强制分片：审批层会把 base64 内容掩码为 ***，导致 runSpec 解析失败
         _b64 = base64.b64encode(json.dumps(result, ensure_ascii=False).encode('utf-8')).decode('ascii')
@@ -1345,12 +1495,11 @@ def main():
                     os.unlink(_f)
             except Exception:
                 pass
+        # P3 读切换：DB 优先（read_bridge），失败/空表降级 md 解析原版
         result = {}
-        if len(sys.argv) > 2 and sys.argv[2] == 'tasks':
-            result['tasks'] = load_tasks().get('tasks', [])
-        else:
-            result['projects'] = load_projects().get('projects', [])
-            result['tasks'] = load_tasks().get('tasks', [])
+        from read_bridge import load_tasks_safe, load_projects_safe
+        result['projects'] = (load_projects_safe() or load_projects()).get('projects', [])
+        result['tasks'] = (load_tasks_safe() or load_tasks()).get('tasks', [])
         b64 = base64.b64encode(json.dumps(result, ensure_ascii=False).encode('utf-8')).decode('ascii')
         import os as _os
         tmp = '/tmp/hpw_data_{}.b64'.format(_os.getpid())

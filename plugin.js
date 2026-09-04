@@ -80,6 +80,24 @@ export default {
       // 应用内快捷键：⌘⇧6/7/8/9 → 分别导航 Agent/Drafts/Projects/Issues
       ctx.register({ id: 'kbd-' + v.view, area: KEYBINDS_AREA, data: { id: v.actionId, category: 'navigation', defaults: ['mod+shift+' + v.kbd], label: 'Work Station: ' + v.label, run: function() { host.navigate(v.route) } } })
     })
+    // 导航即回首页：处于某分区内部子视图（项目详情/任务详情/收件详情）时，点击该分区
+    // 导航项应回到分区首页。根因：子视图是路由内部状态（useReducer.vw/sel），同路由
+    // host.navigate 不触发重渲染，状态不动。故挂文档级监听：点击当前分区导航项时调用
+    // 当前挂载 App 暴露的重置钩子（window.__pwNavReset，见 useReducer）。
+    if (typeof document !== 'undefined' && !window.__pwNavHomeInstalled) {
+      window.__pwNavHomeInstalled = true
+      document.addEventListener('click', function(ev) {
+        var el = ev.target && ev.target.closest ? ev.target.closest('[data-tour^="sidebar-nav-projects-workbench:"]') : null
+        if (!el) return
+        var id = (el.getAttribute('data-tour') || '').split(':')[1] || ''
+        var hit = null
+        VIEWS.forEach(function(v) { if (v.nav === id) hit = v })
+        if (!hit) return
+        var cur = (window.location.hash || '').replace(/^#/, '')
+        if (cur !== hit.route) return // 跨分区导航交给 host.navigate 正常处理
+        if (typeof window.__pwNavReset === 'function') window.__pwNavReset()
+      }, true)
+    }
     ctx.register({ id: 'palette', area: PALETTE_AREA, data: { label: 'Work Station', codicon: 'project' }, action: function() { host.navigate('/agent') } })
     // 冷启动默认首页：应用启动时 hash 为空或为默认 chat 路由 → 自动导航到 Chat 首页
     // （切换默认 profile 后启动 hash 可能是 #/，仍应进入工作台；标志位防热重载重复触发）
@@ -219,6 +237,114 @@ var PBGC = {
 }
 // 项目状态点
 var PJDOT = { open: OPEN_DOT, 'In-Progress': ACC, Waiting: ORANGE, Routine: PURPLE, Agent: PURPLE, Review: ORANGE, Done: GREEN, Dropped: GRAY_DOT }
+
+// ─── Markdown 渲染器（轻量，覆盖 corpus 实测语法）────────────────
+// 规格来源：Ben 2026-09-04 拍板。支持：标题#/列表-（含嵌套）/粗体**/删除线~~/
+// checkbox - [x]（只读展示）/代码围栏```/表格|/单换行保留（pre-wrap 语义由调用处承担）。
+// 不支持：链接/图片/引用/mermaid（corpus 零使用，原样显示）。
+// 返回 jsx 节点数组；opts.t + opts.onToggleAc 提供时 checkbox 可点击写 DB。
+function mdRenderInline(text) {
+  // 行内：粗体 **x**、删除线 ~~x~~。返回 [{t:'text'|'b'|'del', v}]
+  var out = [], i = 0, buf = ''
+  var flush = function() { if (buf) { out.push({ t: 'text', v: buf }); buf = '' } }
+  while (i < text.length) {
+    if (text.startsWith('**', i)) {
+      var end = text.indexOf('**', i + 2)
+      if (end > 0) { flush(); out.push({ t: 'b', v: text.slice(i + 2, end) }); i = end + 2; continue }
+    }
+    if (text.startsWith('~~', i)) {
+      var e2 = text.indexOf('~~', i + 2)
+      if (e2 > 0) { flush(); out.push({ t: 'del', v: text.slice(i + 2, e2) }); i = e2 + 2; continue }
+    }
+    buf += text[i]; i++
+  }
+  flush()
+  return out
+}
+function mdInlineNodes(text, keyBase) {
+  return mdRenderInline(text).map(function(seg, i) {
+    if (seg.t === 'b') return jsx('strong', { key: keyBase + 'b' + i, children: seg.v })
+    if (seg.t === 'del') return jsx('del', { key: keyBase + 'd' + i, style: { color: 'var(--ui-text-quaternary, #999)' }, children: seg.v })
+    return seg.v
+  })
+}
+function mdRender(text, opts) {
+  opts = opts || {}
+  var lines = String(text || '').split('\n')
+  var nodes = []
+  var i = 0, key = 0
+  var inCode = false, codeBuf = [], codeLang = ''
+  var listStack = [] // 缩进层级
+  function closeLists() { listStack = [] }
+  function renderCheckbox(line, indent) {
+    var m = line.match(/^(\s*)[-*]\s*\[([xX\- ]?)\]\s*(.*)$/)
+    if (!m) return null
+    var mark = m[2].toLowerCase(), body = m[3]
+    var idxMatch = body // checkbox 文本
+    var style = { fontSize: '12px', lineHeight: 1.75, color: INK, paddingLeft: indent, display: 'flex', alignItems: 'flex-start', gap: '6px', margin: '1px 0' }
+    var markColor = mark === 'x' ? GREEN : mark === '-' ? ORANGE : FAINT
+    return jsxs('div', { style: style, children: [
+      jsx('span', { style: { color: markColor, fontWeight: 600, flexShrink: 0 }, children: mark === 'x' ? '✓' : mark === '-' ? '×' : '○' }),
+      jsxs('span', { style: mark === 'x' ? { textDecoration: 'line-through', color: MUT } : {}, children: mdInlineNodes(body, 'cb' + (key++)) }),
+    ] })
+  }
+  while (i < lines.length) {
+    var line = lines[i]
+    if (inCode) {
+      if (line.trim().indexOf('```') === 0) {
+        nodes.push(jsx('pre', { key: 'code' + (key++), style: { background: HOV, borderRadius: '6px', padding: '8px 10px', fontSize: '11px', fontFamily: 'monospace', overflowX: 'auto', margin: '4px 0', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }, children: codeBuf.join('\n') }))
+        inCode = false; codeBuf = []; i++; continue
+      }
+      codeBuf.push(line); i++; continue
+    }
+    if (line.trim().indexOf('```') === 0) {
+      closeLists(); inCode = true; codeLang = line.trim().slice(3); codeBuf = []; i++; continue
+    }
+    // 表格
+    if (/^\s*\|/.test(line) && i + 1 < lines.length && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1] || '')) {
+      closeLists()
+      var tRows = []
+      while (i < lines.length && /^\s*\|/.test(lines[i])) { tRows.push(lines[i]); i++ }
+      var parseRow = function(r) { return r.trim().replace(/^\||\|$/g, '').split('|').map(function(c) { return c.trim() }) }
+      var header = parseRow(tRows[0])
+      var bodyRows = tRows.slice(2).map(parseRow)
+      nodes.push(jsx('table', { key: 'tbl' + (key++), style: { borderCollapse: 'collapse', fontSize: '11px', margin: '4px 0', width: '100%' }, children: jsxs(Fragment, { children: [
+        jsx('thead', { children: jsx('tr', { children: header.map(function(h, hi) { return jsx('th', { style: { border: '1px solid ' + LINE, padding: '3px 8px', textAlign: 'left', background: HOV }, children: h }, 'th' + hi) }) }) }),
+        jsx('tbody', { children: bodyRows.map(function(row, ri) { return jsx('tr', { children: row.map(function(c, ci) { return jsx('td', { style: { border: '1px solid ' + LINE, padding: '3px 8px' }, children: mdInlineNodes(c, 'td' + ri + '_' + ci) }, 'tc' + ci) }, 'tr' + ri) }) }) }),
+      ] }) }))
+      continue
+    }
+    // 标题
+    var hm = line.match(/^(#{1,4})\s+(.*)$/)
+    if (hm) {
+      closeLists()
+      var level = hm[1].length
+      var styles = { 1: { fontSize: '14px', fontWeight: 600, color: INK }, 2: { fontSize: '13px', fontWeight: 600, color: INK }, 3: { fontSize: '12px', fontWeight: 600, color: BODY }, 4: { fontSize: '12px', fontWeight: 500, color: BODY } }
+      nodes.push(jsx('div', { key: 'h' + (key++), style: Object.assign({ margin: level <= 2 ? '10px 0 4px' : '6px 0 3px' }, styles[level]), children: mdInlineNodes(hm[2], 'h' + key) }))
+      i++; continue
+    }
+    // checkbox（验收标准交互核心）
+    var cb = renderCheckbox(line, 0)
+    if (cb) { closeLists(); nodes.push(cb); i++; continue }
+    // 列表（含嵌套：按缩进分组渲染）
+    var lm = line.match(/^(\s*)[-*]\s+(.*)$/)
+    if (lm) {
+      var indent = Math.floor(lm[1].length / 2) * 12
+      nodes.push(jsx('div', { key: 'li' + (key++), style: { fontSize: '12px', lineHeight: 1.75, color: INK, paddingLeft: indent + 'px', display: 'flex', gap: '6px' }, children: [
+        jsx('span', { style: { color: FAINT, flexShrink: 0 }, children: '·' }),
+        jsx('span', { style: { flex: 1 }, children: mdInlineNodes(lm[2], 'li' + key) }),
+      ] }))
+      i++; continue
+    }
+    // 空行
+    if (!line.trim()) { closeLists(); nodes.push(jsx('div', { key: 'sp' + (key++), style: { height: '6px' } })); i++; continue }
+    // 普通段落（pre-wrap 由外层容器承担，这里逐行渲染保留单换行）
+    nodes.push(jsx('div', { key: 'p' + (key++), style: { fontSize: '12px', lineHeight: 1.75, color: INK }, children: mdInlineNodes(line, 'p' + key) }))
+    i++
+  }
+  if (inCode && codeBuf.length) nodes.push(jsx('pre', { key: 'codeE' + (key++), style: { background: HOV, borderRadius: '6px', padding: '8px 10px', fontSize: '11px', fontFamily: 'monospace', whiteSpace: 'pre-wrap' }, children: codeBuf.join('\n') }))
+  return nodes
+}
 
 // ─── Helpers ─────────────────────────────────────────────
 function dL(d) { if (!d) return ''; if (d === 'today') return '今天'; if (d === 'overdue') return '已逾期'; if (d === 'week') return '本周'; return d }
@@ -469,6 +595,12 @@ function useReducer(initialView) {
   var setSel = sel[1], setVw = vw[1], setDw = dw[1], setTb = tb[1]
   var setMd = md[1], setEf = ef[1], setSess = sess[1], setTo = to[1]
 
+  // 导航即回首页：App 挂载后暴露重置钩子（cleanup 时清除），供导航条点击监听调用
+  useEffect(function() {
+    window.__pwNavReset = function() { setVw(initialView || 'projects'); setSel(null); setDw(null); setTb('inputs') }
+    return function() { if (window.__pwNavReset) delete window.__pwNavReset }
+  }, [])
+
   // 开始时间自动流转：status==='open' 且 start<=今天 → 自动进入 In-Progress（含重复任务）
   // 在创建任务、编辑任务、刷新时都会触发
   function autoStartFlow(taskList) {
@@ -511,10 +643,8 @@ function useReducer(initialView) {
             // 尝试回写 worker session_id 到任务 frontmatter
             runSpec({ op: 'kanban_worker_session', task_id: t.kanban_task_id, board: 'default' }).then(function(wr) {
               if (wr && wr.worker_session_id) {
-                var prev = t.session_ids || ''
-                var list = prev ? prev.split(',').filter(Boolean) : []
-                if (list.indexOf(wr.worker_session_id) < 0) list.push(wr.worker_session_id)
-                runSpec({ op: 'set_property', path: t.path, field: 'session_ids', value: list.join(',') }).catch(function(e) { console.error('[pw] session_ids write failed:', e) })
+                // P3 DB 真相源：worker session 关联写 DB（frontmatter 通道退役）
+                runSpec({ op: 'link_session', task_path: t.path, sid: wr.worker_session_id, source: 'kanban' }).catch(function(e) { console.error('[pw] link_session failed:', e) })
                 // 将 worker session 关联到项目目录（更新 cwd → 支持 resume + AGENTS.md + 项目会话列表）
                 runSpec({ op: 'kanban_link_session', task_id: t.kanban_task_id, worker_session_id: wr.worker_session_id, board: 'default' }).catch(function(e) { console.error('[pw] kanban_link_session failed:', e) })
                 // 自动写推进记录：kanban worker 完成（YAML schema，跨 agent 可读）
@@ -817,12 +947,7 @@ function useReducer(initialView) {
         return sh('env HOME=/Users/ben python3 ' + SCRIPT + ' read_sessions ' + off + ' 3900 ' + pid).then(function(c) { return c.trim() })
       })).then(function(parts) {
         var b64 = parts.join(''); var sessions = jp(b64).sessions || []
-        // 同步：将 cwd 查到的 session_ids 写入项目 frontmatter（存档记录）
-        var pjn = ps[0].filter(function(p) { return (p.dir || p.title) === projDir })[0]
-        if (pjn && sessions.length) {
-          var ids = sessions.map(function(s) { return s.id }).join(',')
-          runSpec({ op: 'set_property', path: pjn.path, field: 'session_ids', value: ids }).catch(function(e) { console.error('[pw] session_ids sync failed:', e) })
-        }
+        // P3 DB 真相源：cwd 命中的会话由 python 侧同步进 project_sessions（frontmatter 存档通道退役）
         return sessions
       })
     }).catch(function(e) { console.error('[pw] loadSessions failed:', e); return [] })
@@ -931,7 +1056,7 @@ function useReducer(initialView) {
     ps: ps[0], ts: ts[0], loading: loading[0], err: err[0],
     sel: sel[0], vw: vw[0], dw: dw[0], tb: tb[0], md: md[0], ef: ef[0], sess: sess[0], to: to[0], sessCounts: sessCounts,
     handlers: allHandlers,
-    setSel: setSel, setVw: setVw, setDw: setDw, setTb: setTb, setMd: setMd, setEf: setEf, setSess: setSess,
+    setSel: setSel, setVw: setVw, setDw: setDw, setTb: setTb, setMd: setMd, setEf: setEf, setSess: setSess, setTs: setTs,
     load: load, pts: pts, pj: pj, tost: tost,
     updateSection: updateSection, toggleAc: toggleAc,
     doCreateProj: doCreateProj, doCreateTask: doCreateTask, doCreateCmd: doCreateCmd, doSetField: doSetField,
@@ -1468,13 +1593,13 @@ function ChatHome(R) {
       attachPromise.then(function(att) {
         var refText = (att && att.ref_text) || ''
         var promptText = refText ? (refText + '\n\n' + rawText) : rawText
+        // P3 DB 真相源：session↔实体映射直接写 workbench.db（frontmatter session_ids 写入通道退役）
         if (issue) {
-          runSpec({ op: 'read', path: issue.path }).then(function(o) {
-            var m = (o.content || '').match(/^session_ids:\s*(.*)$/m)
-            var tList = m ? m[1].trim().split(',').filter(Boolean) : []
-            if (tList.indexOf(storedId) < 0) tList.push(storedId)
-            return runSpec({ op: 'set_property', path: issue.path, field: 'session_ids', value: tList.join(',') })
-          }).catch(function(e) { console.error('[pw] session_ids write failed:', e) })
+          runSpec({ op: 'link_session', task_path: issue.path, sid: storedId, source: 'desktop' })
+            .catch(function(e) { console.error('[pw] link_session failed:', e) })
+        } else if (proj && proj.path) {
+          runSpec({ op: 'link_session', project_path: proj.path, sid: storedId, source: 'desktop' })
+            .catch(function(e) { console.error('[pw] link_session(proj) failed:', e) })
         }
         // 注意：不在 create 成功后清空编辑器——loading 期间内容保持冻结（用户要求）
         // 清空延迟到 finish()（loading 结束、跳转完成后）再执行，见 stop()
@@ -2673,7 +2798,17 @@ function TaskDetailPage(R) {
   function saveTd() {
     var v = document.getElementById('tdInput').value || ''
     setForce(force + 1); setTdEditing(false)
-    R.updateSection(t.path, '任务详情', v).catch(function(e) { console.error('[pw] updateSection failed:', e); R.load() })
+    // 乐观更新本地 state（dw/ts），再落盘；成功后刷新保一致
+    var updated = Object.assign({}, t, { task_detail: v, body: v })
+    setDw(updated)
+    var newTs = R.ts[0].slice()
+    for (var i = 0; i < newTs.length; i++) {
+      if (newTs[i].path === t.path) { newTs[i] = Object.assign({}, newTs[i], { task_detail: v, body: v }); break }
+    }
+    R.setTs(newTs)
+    R.updateSection(t.path, '任务详情', v)
+      .then(function() { R.load() })
+      .catch(function(e) { console.error('[pw] updateSection failed:', e); R.load() })
   }
   function saveLogEdit(i) {
     var inp = document.getElementById('logEditInput' + i)
@@ -2696,7 +2831,11 @@ function TaskDetailPage(R) {
     var yamlText = '- date: ' + entry.raw_date + '\n'
     if (entry.entryId) yamlText += '  id: ' + entry.entryId + '\n'
     yamlText += '  type: ' + entry.logType + '\n'
-    yamlText += '  summary: ' + newSummary + '\n'
+    if (newSummary.indexOf('\n') >= 0) {
+      yamlText += '  summary: |\n' + newSummary.split('\n').map(function(l) { return '    ' + l }).join('\n') + '\n'
+    } else {
+      yamlText += '  summary: ' + newSummary + '\n'
+    }
     if (entry.sessions.length > 0) {
       yamlText += '  sessions:\n'
       entry.sessions.forEach(function(s) {
@@ -2772,33 +2911,42 @@ function TaskDetailPage(R) {
   }
   // YAML 推进记录（新 schema）
   if (t.logs_yaml) {
-    // 简单 YAML 解析：按 - date: 分割条目
-    var yamlEntries = t.logs_yaml.split(/\n(?=- date:)/)
-    yamlEntries.forEach(function(block) {
-      if (!block.trim()) return
-      var entry = { type: 'yaml', date: '', raw_date: '', summary: '', logType: '', entryId: '', window: '', sessions: [], outputs: [], decisions: [], risks: [], pending: [] }
-      var lines = block.split('\n')
-      var curField = '', curSub = null
-      lines.forEach(function(line) {
-        var m
-        if (m = line.match(/^-\s+date:\s*(.+)/)) { entry.date = m[1].trim(); entry.raw_date = m[1].trim(); curField = '' }
-        else if (m = line.match(/^\s+id:\s*(.+)/)) { entry.entryId = m[1].trim(); curField = '' }
-        else if (m = line.match(/^\s+type:\s*(.+)/)) { entry.logType = m[1].trim(); curField = '' }
-        else if (m = line.match(/^\s+summary:\s*(.+)/)) { entry.summary = m[1].trim(); curField = '' }
-        else if (m = line.match(/^\s+window:\s*(.+)/)) { entry.window = m[1].trim(); curField = '' }
-        else if (line.match(/^\s+sessions:/)) { curField = 'sessions'; curSub = null }
-        else if (line.match(/^\s+outputs:/) || line.match(/^\s+deliverables:/)) { curField = 'outputs' }
-        else if (line.match(/^\s+decisions:/)) { curField = 'decisions'; curSub = null }
-        else if (line.match(/^\s+risks:/)) { curField = 'risks' }
-        else if (line.match(/^\s+pending:/)) { curField = 'pending' }
-        else if (curField === 'sessions' && (m = line.match(/^\s+-\s+id:\s*(.+)/))) { curSub = { id: m[1].trim(), source: '' }; entry.sessions.push(curSub) }
-        else if (curField === 'sessions' && curSub && (m = line.match(/^\s+source:\s*(.+)/))) { curSub.source = m[1].trim() }
-        else if (curField === 'outputs' && (m = line.match(/^\s+-\s+(.+)/))) { entry.outputs.push(m[1].trim()) }
-        else if (curField === 'decisions' && (m = line.match(/^\s+-\s+desc:\s*(.+)/))) { curSub = { desc: m[1].trim(), by: '' }; entry.decisions.push(curSub) }
-        else if (curField === 'decisions' && curSub && (m = line.match(/^\s+by:\s*(.+)/))) { curSub.by = m[1].trim() }
-        else if (curField === 'risks' && (m = line.match(/^\s+-\s+(.+)/))) { entry.risks.push(m[1].trim()) }
-        else if (curField === 'pending' && (m = line.match(/^\s+-\s+(.+)/))) { entry.pending.push(m[1].trim()) }
-      })
+  // 简单 YAML 解析：按 - date: 分割条目；summary 支持块量语法（summary: |）
+  var yamlEntries = t.logs_yaml.split(/\n(?=- date:)/)
+  yamlEntries.forEach(function(block) {
+    if (!block.trim()) return
+    var entry = { type: 'yaml', date: '', raw_date: '', summary: '', logType: '', entryId: '', window: '', sessions: [], outputs: [], decisions: [], risks: [], pending: [] }
+    var lines = block.split('\n')
+    var curField = '', curSub = null
+    var inBlockSummary = false, blockSummaryLines = []
+    lines.forEach(function(line) {
+      var m
+      // 块量 summary：先收尾上一个块
+      if (inBlockSummary) {
+        if (/^\s{4,}/.test(line) || !line.trim()) { blockSummaryLines.push(line.replace(/^\s{4}/, '')); return }
+        inBlockSummary = false
+        entry.summary = blockSummaryLines.join('\n').replace(/\n+$/, ''); blockSummaryLines = []
+      }
+      if (m = line.match(/^-\s+date:\s*(.+)/)) { entry.date = m[1].trim(); entry.raw_date = m[1].trim(); curField = '' }
+      else if (m = line.match(/^\s+id:\s*(.+)/)) { entry.entryId = m[1].trim(); curField = '' }
+      else if (m = line.match(/^\s+type:\s*(.+)/)) { entry.logType = m[1].trim(); curField = '' }
+      else if (m = line.match(/^\s+summary:\s*\|\s*$/)) { inBlockSummary = true; blockSummaryLines = []; curField = '' }
+      else if (m = line.match(/^\s+summary:\s*(.+)/)) { entry.summary = m[1].trim(); curField = '' }
+      else if (m = line.match(/^\s+window:\s*(.+)/)) { entry.window = m[1].trim(); curField = '' }
+      else if (line.match(/^\s+sessions:/)) { curField = 'sessions'; curSub = null }
+      else if (line.match(/^\s+outputs:/) || line.match(/^\s+deliverables:/)) { curField = 'outputs' }
+      else if (line.match(/^\s+decisions:/)) { curField = 'decisions'; curSub = null }
+      else if (line.match(/^\s+risks:/)) { curField = 'risks' }
+      else if (line.match(/^\s+pending:/)) { curField = 'pending' }
+      else if (curField === 'sessions' && (m = line.match(/^\s+-\s+id:\s*(.+)/))) { curSub = { id: m[1].trim(), source: '' }; entry.sessions.push(curSub) }
+      else if (curField === 'sessions' && curSub && (m = line.match(/^\s+source:\s*(.+)/))) { curSub.source = m[1].trim() }
+      else if (curField === 'outputs' && (m = line.match(/^\s+-\s+(.+)/))) { entry.outputs.push(m[1].trim()) }
+      else if (curField === 'decisions' && (m = line.match(/^\s+-\s+desc:\s*(.+)/))) { curSub = { desc: m[1].trim(), by: '' }; entry.decisions.push(curSub) }
+      else if (curField === 'decisions' && curSub && (m = line.match(/^\s+by:\s*(.+)/))) { curSub.by = m[1].trim() }
+      else if (curField === 'risks' && (m = line.match(/^\s+-\s+(.+)/))) { entry.risks.push(m[1].trim()) }
+      else if (curField === 'pending' && (m = line.match(/^\s+-\s+(.+)/))) { entry.pending.push(m[1].trim()) }
+    })
+    if (inBlockSummary) entry.summary = blockSummaryLines.join('\n').replace(/\n+$/, '')
       // 日期补全为 YYYY-MM-DD HH:mm:ss（排序用）；raw_date 保留原始格式用于显示
       if (entry.date) {
         if (entry.date.length <= 5) entry.date = new Date().getFullYear() + '-' + entry.date
@@ -2871,7 +3019,7 @@ function TaskDetailPage(R) {
                   ]}),
                 ]})
               : jsxs('div', { style: { padding: '0 12px 10px' }, children: [
-                  jsx('div', { style: { fontSize: '12px', lineHeight: 1.7, color: BODY, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }, children: clampedDetail || '—' }),
+                  jsx('div', { style: { fontSize: '12px', lineHeight: 1.7, color: BODY, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }, children: (clampedDetail ? mdRender(clampedDetail) : '—') }),
                   needClamp && jsx('span', {
                     style: { fontSize: '10px', color: ACC, cursor: 'pointer', display: 'inline-block', marginTop: '4px' },
                     onClick: function(ev) { ev.stopPropagation(); setDetailExpanded(!isDetailExpanded) },
@@ -2937,7 +3085,7 @@ function TaskDetailPage(R) {
                               jsx('span', { style: { color: ACC, fontSize: '11px', cursor: 'pointer', whiteSpace: 'nowrap' }, onMouseDown: function(e) { e.preventDefault() }, onClick: function() { saveYamlEdit(entry) }, children: '保存' }),
                               jsx('span', { style: { color: MUT, fontSize: '11px', cursor: 'pointer', whiteSpace: 'nowrap' }, onClick: function() { setEditingYaml(null) }, children: '取消' }),
                             ] })
-                          : jsx('div', { style: { fontSize: '12px', color: INK, fontWeight: 400, lineHeight: 1.75, marginBottom: (entry.outputs.length || entry.decisions.length || entry.risks.length || entry.pending.length) ? '6px' : '0', cursor: 'text', title: entry.entryId ? '双击编辑' : '' }, onDoubleClick: function() { if (entry.entryId) setEditingYaml(entry.entryId) }, children: entry.summary }),
+                          : jsxs('div', { style: { fontSize: '12px', color: INK, fontWeight: 400, lineHeight: 1.75, marginBottom: (entry.outputs.length || entry.decisions.length || entry.risks.length || entry.pending.length) ? '6px' : '0', cursor: 'text', title: entry.entryId ? '双击编辑' : '' }, onDoubleClick: function() { if (entry.entryId) setEditingYaml(entry.entryId) }, children: entry.summary.indexOf('\n') >= 0 ? mdRender(entry.summary) : entry.summary }),
                         (entry.outputs.length > 0 || entry.decisions.length > 0 || entry.risks.length > 0 || entry.pending.length > 0) && jsxs('div', { style: { background: INSET, borderRadius: '5px', padding: '12px 14px', marginTop: '6px' }, children: [
                           entry.outputs.length > 0 && jsxs('div', { style: { marginBottom: '8px' }, children: [
                             jsx('div', { style: { fontSize: '11px', fontWeight: 600, color: GREEN, textTransform: 'uppercase', letterSpacing: 0, marginBottom: '3px' }, children: '产出' }),
