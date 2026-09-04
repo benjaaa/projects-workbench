@@ -759,7 +759,7 @@ function useReducer(initialView) {
     var prio = document.getElementById('ntPriority').value, due = document.getElementById('ntDue').value, today = todayLocal()
     var startVal = document.getElementById('ntStart') ? document.getElementById('ntStart').value : ''
     var status = document.getElementById('ntStatus') ? document.getElementById('ntStatus').value : 'open'
-    var handler = document.getElementById('ntHandler') ? document.getElementById('ntHandler').value.trim() : ''
+    var handler = document.getElementById('ntHandler') ? document.getElementById('ntHandler').value.trim() : '周本'
     // 重复周期设置（从全局配置读取，RepeatFields 同步写入）
     var repCfg = window.__pwRepeatConfig
     var repEnabled = !!(repCfg && repCfg.mode === 'fixed')
@@ -767,17 +767,30 @@ function useReducer(initialView) {
     var repEvery = repCfg ? (repCfg.every || '1') : ''
     var repDay = repCfg ? (repCfg.day || '') : ''
     var repAnchor = repCfg ? repCfg.anchor : (due || today)
-    var repFm = repEnabled
-      ? 'repeat_mode: fixed\nrepeat_unit: ' + repUnit + '\nrepeat_every: ' + repEvery + (repDay ? '\nrepeat_day: ' + repDay : '') + '\nrepeat_anchor: ' + repAnchor + '\n'
-      : ''
     window.__pwRepeatConfig = null
-    // 开始时间：用户填了才写 start（否则不写，保持待办 open）
-    var startFm = startVal ? ('start: ' + startVal + '\n') : ''
-    var content = '---\ntitle: ' + title + '\nstatus: ' + status + '\npriority: ' + prio + '\nhandler: ' + handler + '\nproject: ' + pjn.title + '\n' + startFm + (due ? 'due: ' + due + '\n' : '') + repFm + 'tags:\n  - task\n---\n\n# ' + title + '\n\n## 目标\n' + goal + '\n\n## 任务详情\n（任务背景、目的、方案等补充信息，可自由组织子标题）\n\n## 验收标准\n' + acLines + '\n\n## 推进记录\n- ' + today + ' 创建任务\n'
-    var projDir = pjn.dir || pjn.title
-    runSpec({ op: 'ensure_dir', path: PROOT + '/' + projDir + '/tasks' })
-      .then(function() { return runSpec({ op: 'write', path: PROOT + '/' + projDir + '/tasks/任务-' + title + '.md', content: content }) })
-      .then(function() { setMd(null); load(); tost('已创建任务「' + title + '」'); logOp(pjn ? (pjn.dir || pjn.title) : '', title, 'create_task', '「' + (pjn ? (pjn.title || pjn.dir) : '') + '」创建任务「' + title + '」') })
+    // 重复周期配置（传给 create_task）
+    var repeatCfg = repEnabled ? { mode: 'fixed', unit: repUnit, every: parseInt(repEvery, 10) || 1, day: repDay ? parseInt(repDay, 10) : null, anchor: repAnchor } : null
+    // 直接调 create_task（DB 先行，跳过 ensure_dir + write 兼容层）
+    runSpec({
+      op: 'create_task',
+      project_id: pjn.title,
+      title: title,
+      status: status,
+      priority: prio,
+      handler: handler,
+      due: due,
+      start: startVal,
+      goal: goal,
+      acceptance: acLines,
+      repeat_cfg: repeatCfg
+    })
+      .then(function(r) {
+        if (r && r.ok) {
+          setMd(null); load(); tost('已创建任务「' + title + '」'); logOp(pjn ? (pjn.dir || pjn.title) : '', title, 'create_task', '「' + (pjn ? (pjn.title || pjn.dir) : '') + '」创建任务「' + title + '」')
+        } else {
+          setErr((r && r.error) || '创建失败'); try { alert('创建任务失败：' + ((r && r.error) || '').slice(0, 200)) } catch(_) {}
+        }
+      })
       .catch(function(e) { setErr(friendlyErr(e)); try { alert('创建任务失败：' + ((e && e.message) || String(e)).slice(0, 200)) } catch(_) {} })
     } catch (e) { console.error('[pw] doCreateTask throw:', e); try { alert('创建失败：' + ((e && e.message) || String(e)).slice(0, 120)) } catch(_) {} }
   }
@@ -3414,7 +3427,7 @@ function Modal(R) {
       jsx(ModalField, { label: '截止日期', children: jsx(ModalInput, { id: 'ntDue', type: 'date' }) }),
     ]}),
     jsxs('div', { key: 'f5', style: { display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '16px', marginBottom: '10px' }, children: [
-      jsx(ModalField, { label: '处理人', children: jsx(HandlerPicker, { id: 'ntHandler', handlers: R.handlers }) }),
+      jsx(ModalField, { label: '处理人', children: jsx(HandlerPicker, { id: 'ntHandler', handlers: R.handlers, defaultValue: '周本' }) }),
       jsx(ModalField, { label: '任务状态', children: jsx(Sel, { id: 'ntStatus', defaultValue: 'open', options: [['open', '待办'], ['In-Progress', '进行中'], ['Waiting', '等待中'], ['Done', '已完成'], ['Dropped', '已取消']] }) }),
       jsx(ModalField, { label: '优先级', children: jsx(Sel, { id: 'ntPriority', defaultValue: 'p1', options: [['p0', 'P0'], ['p1', 'P1'], ['p2', 'P2']] }) }),
     ]}),

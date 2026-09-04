@@ -316,8 +316,17 @@ def main():
                     fm_m = re.match(r'^---\n([\s\S]*?)\n---', content)
                     fm = fm_m.group(1) if fm_m else ''
                     def _fm(key):
-                        mm = re.search(r'^' + key + r':\s*(.*)$', fm, re.M)
-                        return mm.group(1).strip() if mm else ''
+                        # 严格按行匹配，避免跨行误捕获（如 handler 空时捕获到下一行 project:）
+                        for line in fm.split('\n'):
+                            if line.startswith(key + ':'):
+                                val = line[len(key) + 1:].strip()
+                                # 如果值本身以另一个 key: 开头，说明是空值（如 "handler: \nproject: xxx"）
+                                if val and not val.startswith('#'):
+                                    # 额外校验：值不应包含 "key: " 模式（防止 "handler: project: xxx" 这种异常）
+                                    if ': ' not in val or val.index(': ') > 20:
+                                        return val
+                                return ''
+                        return ''
                     goal_m = re.search(r'## 目标\n([\s\S]*?)(?=\n## |\Z)', content)
                     ac_m = re.search(r'## 验收标准\n([\s\S]*?)(?=\n## |\Z)', content)
                     result = create_task(
