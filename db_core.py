@@ -937,25 +937,20 @@ def rename_task(path, new_title, changed_by=''):
             row = _get_entity(conn, 'task', entity_id)
             if not row:
                 return {'ok': False, 'error': f'task not found: {entity_id}'}
+            entity_id = row['id']  # 使用真实 UUID，不是路径里的 title
             
             old_title = row['title']
             if old_title == new_title:
                 return {'ok': True, 'unchanged': True, 'db_first': True}
             
-            # 更新 DB（title 和 id 都更新）
+            # 更新 DB（只更新 title，id 保持 UUID 不变）
             conn.execute('UPDATE tasks SET title=? WHERE id=?', (new_title, entity_id))
             _log_change('task', entity_id, 'title', old_title, new_title, changed_by)
-            # 更新 id（文件名锚定）
-            conn.execute('UPDATE tasks SET id=? WHERE id=?', (new_title, entity_id))
-            # 更新关联表的外键
-            conn.execute('UPDATE task_sessions SET task_id=? WHERE task_id=?', (new_title, entity_id))
-            conn.execute('UPDATE log_entries SET task_id=? WHERE task_id=?', (new_title, entity_id))
-            conn.execute('UPDATE documents SET entity_id=? WHERE entity_type=? AND entity_id=?', (new_title, 'task', entity_id))
-            v = _bump_version(conn, 'task', new_title, changed_by)
+            v = _bump_version(conn, 'task', entity_id, changed_by)
             conn.commit()
             
             # 触发渲染（新标题写入新文件，旧文件删除）
-            _trigger_render('task', new_title)
+            _trigger_render('task', entity_id)
             
             # 删除旧文件
             old_file = os.path.join(VAULT, path)
