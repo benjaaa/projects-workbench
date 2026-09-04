@@ -1037,12 +1037,12 @@ function useReducer(initialView) {
   function doRenameTitle(t, newTitle) {
     var nt = (newTitle || '').trim()
     if (!nt) { tost('标题不能为空'); return }
-    if (nt === t.title) { R.setDw(Object.assign({}, t)); return }
+    if (nt === t.title) { setDw(Object.assign({}, t)); return }
     runSpec({ op: 'rename_task', path: t.path, new_title: nt }).then(function(r) {
       // 更新 UI 状态：title + path（若文件名变了）
       var updated = Object.assign({}, t, { title: nt })
       if (r && r.path) updated.path = r.path
-      R.setDw(updated)
+      setDw(updated)
       var newTs = ts[0].slice()
       for (var i = 0; i < newTs.length; i++) {
         if (newTs[i].path === t.path) { newTs[i] = Object.assign({}, newTs[i], { title: nt }); if (r && r.path) newTs[i].path = r.path }
