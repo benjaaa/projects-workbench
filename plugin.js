@@ -923,6 +923,24 @@ function useReducer(initialView) {
       .catch(function(e) { console.error('[pw] doSetProjField failed:', field, value, e); tost('失败：' + ((e && e.message) || '').slice(0, 40)); load() })
   }
 
+  function doDeleteProject(pjn) {
+    if (!pjn) return
+    var taskCount = (ts[0] || []).filter(function(x) { return x.project === pjn.title || x.dir === pjn.dir }).length
+    var tip = '确定删除项目「' + (pjn.title || pjn.dir) + '」？' + (taskCount > 0 ? '\\n该项目下还有 ' + taskCount + ' 个任务，将一并删除。' : '') + '\\n此操作不可撤销。'
+    if (!confirm(tip)) return
+    runSpec({ op: 'project_delete', path: pjn.path })
+      .then(function(r) {
+        if (r && r.ok) {
+          tost('已删除项目「' + (pjn.title || pjn.dir) + '」')
+          logOp(pjn.dir || pjn.title, '', 'delete_project', '删除项目「' + (pjn.title || pjn.dir) + '」')
+          setSel(null); setVw('list'); load()
+        } else {
+          tost('删除失败：' + ((r && r.error) || '').slice(0, 60))
+        }
+      })
+      .catch(function(e) { console.error('[pw] doDeleteProject failed:', e); tost('删除失败：' + ((e && e.message) || '').slice(0, 60)) })
+  }
+
   function doSaveOv() {
     var pjn = pj(sel[0]); if (!pjn) return; var text = document.getElementById('editInput').value.trim(), sec = ef[0] === 'bg' ? '项目背景' : '项目目标'
     var newPs = ps[0].slice()
@@ -1060,7 +1078,7 @@ function useReducer(initialView) {
     load: load, pts: pts, pj: pj, tost: tost,
     updateSection: updateSection, toggleAc: toggleAc,
     doCreateProj: doCreateProj, doCreateTask: doCreateTask, doCreateCmd: doCreateCmd, doSetField: doSetField,
-    doAddLog: doAddLog, doSaveOv: doSaveOv, doSetProjField: doSetProjField, loadSessions: loadSessions, doCreateSess: doCreateSess,
+    doAddLog: doAddLog, doSaveOv: doSaveOv, doSetProjField: doSetProjField, doDeleteProject: doDeleteProject, loadSessions: loadSessions, doCreateSess: doCreateSess,
     doHandleTask: doHandleTask,
     doDeleteTask: doDeleteTask, doRenameTitle: doRenameTitle,
     doReviewResume: doReviewResume, doReviewPass: doReviewPass,
@@ -2446,6 +2464,14 @@ function ProjectDetail(R) {
                 onChange: function(e) { R.doSetProjField(pjn, 'status', e.target.value) },
                 children: [['open','待办'],['In-Progress','进行中'],['Waiting','等待中'],['Routine','常态化'],['Done','已完成'],['Dropped','已取消']].map(function(o) { return jsx('option', { value: o[0], children: o[1] }, o[0]) }),
               }),
+              // 删除项目按钮
+              pjn && jsx('span', {
+                className: 'flex items-center justify-center w-6 h-6 rounded-md cursor-pointer transition-colors hover:bg-[#fef2f2]',
+                style: { color: DANGER },
+                title: '删除项目',
+                onClick: function(e) { e.stopPropagation(); R.doDeleteProject(pjn) },
+                children: jsx(Codicon, { name: 'trash', className: 'text-[0.875rem]' }),
+              }),
             ]}),
             pjn && jsxs('div', { className: 'flex items-center gap-2 text-[0.6875rem] mt-0.5', style: { color: MUT }, children: [
               jsx('input', { type: 'date', defaultValue: pjn.start || '', style: { color: MUT, border: 'none', background: 'transparent', outline: 'none', fontSize: '0.6875rem', cursor: 'pointer' }, onChange: function(e) { R.doSetProjField(pjn, 'start', e.target.value) } }),
@@ -2476,7 +2502,7 @@ function ProjectDetail(R) {
                     jsx('span', { className: 'inline-flex items-center text-[0.6875rem] px-2.5 cursor-pointer select-none transition-colors hover:bg-[#f4f5f6] border border-[#e5e5e5]', style: { color: BODY, borderRadius: '8px', height: '24px', lineHeight: '24px' }, onClick: function() { R.setEf(null) }, children: '取消' }),
                   ]}),
                 ]})
-              : jsx('p', { style: { margin: '0', padding: '12px 12px 12px 12px', fontSize: '12.5px', lineHeight: '1.625', color: BODY, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }, children: pjn.background || '暂无背景说明' }),
+              : jsx('div', { style: { margin: '0', padding: '12px 12px 12px 12px', fontSize: '12.5px', lineHeight: '1.625', color: BODY, wordBreak: 'break-word' }, children: pjn.background ? mdRender(pjn.background) : '暂无背景说明' }),
           ]}),
           // 卡片2：项目目标（Context Cards chunk，全部内联 style）
           jsxs('div', { style: { overflow: 'hidden', borderRadius: '10px', background: SURF, boxShadow: SH_CARD }, children: [
@@ -2494,7 +2520,7 @@ function ProjectDetail(R) {
                     jsx('span', { className: 'inline-flex items-center text-[0.6875rem] px-2.5 cursor-pointer select-none transition-colors hover:bg-[#f4f5f6] border border-[#e5e5e5]', style: { color: BODY, borderRadius: '8px', height: '24px', lineHeight: '24px' }, onClick: function() { R.setEf(null) }, children: '取消' }),
                   ]}),
                 ]})
-              : jsx('p', { style: { margin: '0', padding: '12px 12px 12px 12px', fontSize: '12.5px', lineHeight: '1.625', color: BODY, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }, children: pjn.goal || '暂无目标说明' }),
+              : jsx('div', { style: { margin: '0', padding: '12px 12px 12px 12px', fontSize: '12.5px', lineHeight: '1.625', color: BODY, wordBreak: 'break-word' }, children: pjn.goal ? mdRender(pjn.goal) : '暂无目标说明' }),
           ]}),
         ]}),
       ]}),

@@ -299,6 +299,64 @@ def main():
                 _json_err(f'kanban: {type(e).__name__}: {e}')
             return
         
+        elif op == 'ensure_dir':
+            # 兼容层：旧前端调用，新架构目录随实体创建自动建立，直接返回成功
+            _json_out({'ok': True})
+            return
+
+        elif op == 'write':
+            # 兼容层：旧前端"写 md 文件"调用 → 识别任务创建走 create_task，其余拒绝
+            try:
+                path = spec.get('path', '')
+                content = spec.get('content', '')
+                m = re.match(r'^2\. Project/2\.1 Project/([^/]+)/tasks/任务-(.+)\.md$', path)
+                if m and content.startswith('---'):
+                    # 任务创建：从 frontmatter 解析字段
+                    from db_core import create_task
+                    fm_m = re.match(r'^---\n([\s\S]*?)\n---', content)
+                    fm = fm_m.group(1) if fm_m else ''
+                    def _fm(key):
+                        mm = re.search(r'^' + key + r':\s*(.*)$', fm, re.M)
+                        return mm.group(1).strip() if mm else ''
+                    goal_m = re.search(r'## 目标\n([\s\S]*?)(?=\n## |\Z)', content)
+                    ac_m = re.search(r'## 验收标准\n([\s\S]*?)(?=\n## |\Z)', content)
+                    result = create_task(
+                        project_id=m.group(1),
+                        title=_fm('title') or m.group(2),
+                        status=_fm('status') or 'open',
+                        priority=_fm('priority') or 'p2',
+                        handler=_fm('handler'),
+                        due=_fm('due'),
+                        start=_fm('start'),
+                        goal=(goal_m.group(1).strip() if goal_m else ''),
+                        acceptance=(ac_m.group(1).strip() if ac_m else ''),
+                    )
+                    _json_out(result)
+                else:
+                    _json_err('write op 仅支持任务文件创建，其他写入已被新架构禁止')
+            except Exception as e:
+                _json_err(f'write compat: {type(e).__name__}: {e}')
+            return
+
+        elif op == 'delete_file':
+            # 兼容层：删除任务文件 → delete_task
+            try:
+                from db_core import delete_task
+                result = delete_task(spec.get('path', ''))
+                _json_out(result)
+            except Exception as e:
+                _json_err(f'delete_file compat: {type(e).__name__}: {e}')
+            return
+
+        elif op == 'project_delete':
+            try:
+                from db_core import delete_project
+                result = delete_project(spec.get('path', ''))
+                _json_out(result)
+            except Exception as e:
+                _json_err(f'project_delete: {type(e).__name__}: {e}')
+            return
+
         elif op.startswith('kanban_'):
             # 其他 kanban 操作统一走 kanban_bridge
             try:

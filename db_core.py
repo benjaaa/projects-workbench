@@ -1132,6 +1132,71 @@ def _create_project_dirs(dir_path):
             f.write('')
 
 
+def delete_project(path, changed_by=''):
+    """删除项目（DB 先行，文件目录一并清理）。
+
+    Args:
+        path: 项目说明文档路径（如 '2. Project/2.1 Project/XX/项目说明-XX.md'）
+              或项目目录路径（如 '2. Project/2.1 Project/XX'）
+        changed_by: 变更来源
+
+    Returns:
+        dict: {'ok': True} 或 {'ok': False, 'error': str}
+    """
+    import shutil
+    try:
+        # 从路径提取项目名
+        p = (path or '').rstrip('/')
+        if '/项目说明-' in p:
+            project_id = p.split('/')[-2] if p.count('/') >= 1 else ''
+            # 兼容 '.../XX/项目说明-XX.md' → 取倒数第二段
+            parts = p.split('/')
+            project_id = parts[-2] if len(parts) >= 2 else ''
+        else:
+            project_id = p.split('/')[-1]
+        if not project_id:
+            return {'ok': False, 'error': f'bad project path: {path[:120]}'}
+
+        conn = _wb_conn()
+        try:
+            row = _get_entity(conn, 'project', project_id)
+            if not row:
+                return {'ok': False, 'error': f'project not found: {project_id}'}
+
+            # 项目下任务一并删除（含关联）
+            task_ids = [r['id'] for r in conn.execute('SELECT id FROM tasks WHERE project_id=?', (project_id,)).fetchall()]
+            for tid in task_ids:
+                conn.execute('DELETE FROM task_sessions WHERE task_id=?', (tid,))
+                conn.execute('DELETE FROM log_sessions WHERE entry_id IN (SELECT id FROM log_entries WHERE task_id=?)', (tid,))
+                conn.execute('DELETE FROM log_detail WHERE entry_id IN (SELECT id FROM log_entries WHERE task_id=?)', (tid,))
+                conn.execute('DELETE FROM log_entries WHERE task_id=?', (tid,))
+                conn.execute('DELETE FROM documents WHERE entity_type=? AND entity_id=?', ('task', tid))
+            conn.execute('DELETE FROM tasks WHERE project_id=?', (project_id,))
+
+            # 项目自身关联
+            conn.execute('DELETE FROM project_sessions WHERE project_id=?', (project_id,))
+            conn.execute('DELETE FROM documents WHERE entity_type=? AND entity_id=?', ('project', project_id))
+            conn.execute('DELETE FROM projects WHERE id=?', (project_id,))
+
+            _log_change('project', project_id, 'deleted', row['name'] if isinstance(row, dict) or hasattr(row, 'keys') else project_id, None, changed_by)
+            conn.commit()
+
+            # 删除目录（含全部文件）
+            proj_dir = os.path.join(VAULT, PROOT, project_id)
+            if os.path.isdir(proj_dir):
+                try:
+                    shutil.rmtree(proj_dir)
+                except Exception:
+                    pass  # 文件删除失败不阻塞
+
+            _log_op(changed_by or 'plugin', 'delete_project', 'project', project_id, f'删除项目「{project_id}」（含 {len(task_ids)} 个任务）')
+            return {'ok': True, 'deleted_tasks': len(task_ids)}
+        finally:
+            conn.close()
+    except Exception as e:
+        return {'ok': False, 'error': f'{type(e).__name__}: {e}'}
+
+
 def _write_file_direct(path, content):
     """直接写文件（不经过 DB，用于 AGENTS.md 等非投影文件）。"""
     import tempfile
