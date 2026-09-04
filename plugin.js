@@ -2240,21 +2240,20 @@ function iwOptLabel(k, v) {
   if (k === 'priority') return PR[v] || v
   return v
 }
-// 日期筛选口径：已完成/取消与无 due 不参与（与看板强调口径一致）；多选 OR。
-// 窗口口径（用户确认 2026-08-31）：近N天 = 截止日期早于等于窗口终点（自然包含已逾期）；
-// 已逾期作为独立选项供单独筛选。
+// 日期筛选口径：Done/Dropped 按 complete，其他按 due；多选 OR。
+// 窗口口径（用户确认 2026-09-05）：近N天 = [今天-N+1, 今天]，含今天；已逾期独立选项。
 function iwMatchDue(t, sel, today) {
-  // Done/Dropped 任务按 complete 日期过滤（近7天完成），未完成按 due 日期过滤
   var isDone = t.status === 'Done' || t.status === 'Dropped'
-  var filterDate = isDone ? (t.complete || t.due || '') : (t.due || '')
+  // Done/Dropped 严格按 complete，其他严格按 due，无回退
+  var filterDate = isDone ? (t.complete || '') : (t.due || '')
   if (!filterDate) return false
-  // 过去7天的起点（Done 任务用）
-  var past7 = addDaysLocal(-7)
-  var past30 = addDaysLocal(-30)
+  // 近N天窗口：含今天，共 N 天。如近7天 = [今天-6, 今天]
+  var past7 = addDaysLocal(-6)   // 今天-6，含今天共7天
+  var past30 = addDaysLocal(-29) // 今天-29，含今天共30天
   for (var i = 0; i < sel.length; i++) {
     var o = sel[i]
     if (o === 'overdue' && !isDone && t.due && t.due < today) return true
-    // 未完成任务：due 在未来7天内；Done 任务：complete 在过去7天内
+    // 未完成任务：due 在未来7天内；Done 任务：complete 在近7天窗口内
     if (o === '7d' && (isDone ? filterDate >= past7 : filterDate <= addDaysLocal(7))) return true
     if (o === '30d' && (isDone ? filterDate >= past30 : filterDate <= addDaysLocal(30))) return true
   }
