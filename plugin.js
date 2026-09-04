@@ -2825,7 +2825,7 @@ function TaskDetailPage(R) {
     setForce(force + 1); setTdEditing(false)
     // 乐观更新本地 state（dw/ts），再落盘；成功后刷新保一致
     var updated = Object.assign({}, t, { task_detail: v, body: v })
-    setDw(updated)
+    R.setDw(updated)
     var newTs = R.ts[0].slice()
     for (var i = 0; i < newTs.length; i++) {
       if (newTs[i].path === t.path) { newTs[i] = Object.assign({}, newTs[i], { task_detail: v, body: v }); break }
@@ -2877,11 +2877,11 @@ function TaskDetailPage(R) {
       new RegExp('- date: ' + entry.raw_date.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '[\\s\\S]*?(?=\\n- date:|$)'),
       yamlText.trimEnd()
     ) })
-    setDw(updated)
+    R.setDw(updated)
     setEditingYaml(null)
     runSpec({ op: 'edit_yaml_log', path: t.path, entry_id: entry.entryId, new_yaml_text: yamlText.trimEnd() }).then(function() {
       tost('已保存')
-    }).catch(function(e) { console.error('[pw] editYamlLog failed:', e); setDw(t); tost('保存失败') })
+    }).catch(function(e) { console.error('[pw] editYamlLog failed:', e); R.setDw(t); tost('保存失败') })
   }
   function doNewSession() {
     setHandleMenuOpen(false)

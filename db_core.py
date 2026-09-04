@@ -680,23 +680,33 @@ def _parse_yaml_entry(text):
     return entry
 
 
-def _validate_sids(sids):
-    """校验 session ID 是否真实存在于 state.db。"""
+def _validate_sids(sids, max_retries=3):
+    """校验 session ID 是否真实存在于 state.db。
+
+    对于刚创建的 session，state.db 可能还没落库，支持重试。
+    """
     if not sids:
         return None
     state_db = os.path.join(os.path.expanduser('~'), '.hermes/profiles/business_analysis/state.db')
     if not os.path.exists(state_db):
         return None  # state.db 不存在，跳过校验
-    try:
-        conn = sqlite3.connect(state_db)
-        placeholders = ','.join('?' for _ in sids)
-        rows = conn.execute(f'SELECT id FROM sessions WHERE id IN ({placeholders})', list(sids)).fetchall()
-        conn.close()
-        live = {r[0] for r in rows}
-        dead = [s for s in sids if s not in live]
-        return dead or None
-    except Exception:
-        return None
+    
+    dead = None
+    for attempt in range(max_retries):
+        try:
+            conn = sqlite3.connect(state_db)
+            placeholders = ','.join('?' for _ in sids)
+            rows = conn.execute(f'SELECT id FROM sessions WHERE id IN ({placeholders})', list(sids)).fetchall()
+            conn.close()
+            live = {r[0] for r in rows}
+            dead = [s for s in sids if s not in live]
+            if not dead:
+                return None  # 全部有效
+            if attempt < max_retries - 1:
+                time.sleep(0.1 * (attempt + 1))  # 递增延迟：100ms, 200ms, 300ms
+        except Exception:
+            return None
+    return dead  # 重试后仍无效
 
 
 def link_session(task_path=None, project_path=None, sid='', source='plugin', changed_by=''):
@@ -779,12 +789,15 @@ def create_task(project_id, title, goal='', task_detail='', acceptance='', prior
         dict: {'ok': True, 'task_id': str} 或 {'ok': False, 'error': str}
     """
     try:
-        # 校验项目存在
+        # 校验项目存在（支持 id 或 name 双路查找，与 _get_entity 一致）
         conn = _wb_conn()
         try:
             proj = conn.execute('SELECT id FROM projects WHERE id=?', (project_id,)).fetchone()
             if not proj:
+                proj = conn.execute('SELECT id FROM projects WHERE name=?', (project_id,)).fetchone()
+            if not proj:
                 return {'ok': False, 'error': f'项目不存在: {project_id}'}
+            project_id = proj['id']  # 归一化为真实 id
             
             # 任务 ID = 标题（去重：加时间戳后缀）
             task_id = title
