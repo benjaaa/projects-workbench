@@ -199,14 +199,52 @@ class ValidationError(Exception):
 
 
 def _validate_path(path):
-    """校验路径格式，返回 (entity_type, entity_id, project_id)。"""
+    """校验路径格式，返回 (entity_type, display_name, project_name)。
+
+    UUID 主键后，路径中的名字是显示名（title/name），不是 DB 主键。
+    调用方需通过 _resolve_entity_id 解析为 UUID。
+    """
     m = TASK_RE.match(path or '')
     if m:
-        return 'task', m.group(2), m.group(1)  # task_id, project_id
+        return 'task', m.group(2), m.group(1)  # title, project_name
     m = PROJ_RE.match(path or '')
     if m:
-        return 'project', m.group(1), m.group(1)
+        return 'project', m.group(1), m.group(1)  # name, name
     raise ValidationError(f'invalid path: {path[:120]}')
+
+
+def _resolve_entity_id(conn, entity_type, display_name, project_name=None):
+    """将路径中的显示名解析为 DB 中的真实 UUID。
+
+    优先级：id（UUID 匹配）> title/name（显示名匹配）
+    """
+    if entity_type == 'task':
+        # 先按 id 查（UUID）
+        row = conn.execute('SELECT id FROM tasks WHERE id=?', (display_name,)).fetchone()
+        if row:
+            return row['id']
+        # 再按 title + project 查
+        if project_name:
+            row = conn.execute(
+                'SELECT t.id FROM tasks t JOIN projects p ON t.project_id = p.id WHERE t.title=? AND p.name=?',
+                (display_name, project_name)
+            ).fetchone()
+            if row:
+                return row['id']
+        # 最后按 title 全局查
+        row = conn.execute('SELECT id FROM tasks WHERE title=?', (display_name,)).fetchone()
+        if row:
+            return row['id']
+    elif entity_type == 'project':
+        # 先按 id 查（UUID）
+        row = conn.execute('SELECT id FROM projects WHERE id=?', (display_name,)).fetchone()
+        if row:
+            return row['id']
+        # 再按 name 查
+        row = conn.execute('SELECT id FROM projects WHERE name=?', (display_name,)).fetchone()
+        if row:
+            return row['id']
+    return None
 
 
 def _resolve_task_id(conn, path_id):
@@ -294,10 +332,17 @@ def set_property(path, field, value, if_version=None, changed_by=''):
         
         conn = _wb_conn()
         try:
-            row = _get_entity(conn, entity_type, entity_id)
+            # 解析显示名为 UUID
+            resolved_id = _resolve_entity_id(conn, entity_type, entity_id, project_id)
+            if not resolved_id:
+                return {'ok': False, 'error': f'{entity_type} not found: {entity_id}'}
+            entity_id = resolved_id
+            
+            # 获取当前行
+            table = 'tasks' if entity_type == 'task' else 'projects'
+            row = conn.execute(f'SELECT * FROM {table} WHERE id=?', (entity_id,)).fetchone()
             if not row:
                 return {'ok': False, 'error': f'{entity_type} not found: {entity_id}'}
-            entity_id = row['id']  # 统一使用真实 id（路径里可能是 title）
             if if_version is not None and (row['version'] or 1) != int(if_version):
                 return {'ok': False, 'error': 'VERSION_CONFLICT', 'current_version': row['version'] or 1}
             
@@ -352,15 +397,21 @@ def update_section(path, section, text, if_version=None, changed_by=''):
         
         conn = _wb_conn()
         try:
-            row = _get_entity(conn, entity_type, entity_id)
+            # 解析显示名为 UUID
+            resolved_id = _resolve_entity_id(conn, entity_type, entity_id, project_id)
+            if not resolved_id:
+                return {'ok': False, 'error': f'{entity_type} not found: {entity_id}'}
+            entity_id = resolved_id
+            
+            # 获取当前行用于版本校验和旧值记录
+            table = 'tasks' if entity_type == 'task' else 'projects'
+            row = conn.execute(f'SELECT * FROM {table} WHERE id=?', (entity_id,)).fetchone()
             if not row:
                 return {'ok': False, 'error': f'{entity_type} not found: {entity_id}'}
-            entity_id = row['id']  # 统一使用真实 id（路径里可能是 title）
             if if_version is not None and (row['version'] or 1) != int(if_version):
                 return {'ok': False, 'error': 'VERSION_CONFLICT', 'current_version': row['version'] or 1}
             
             old = row[field]
-            table = 'tasks' if entity_type == 'task' else 'projects'
             conn.execute(f'UPDATE {table} SET {field}=? WHERE id=?', (text, entity_id))
             _log_change(entity_type, entity_id, field, old, text, changed_by)
             v = _bump_version(conn, entity_type, entity_id, changed_by)
@@ -399,10 +450,16 @@ def toggle_ac(path, idx, changed_by=''):
         
         conn = _wb_conn()
         try:
-            row = _get_entity(conn, 'task', entity_id)
+            # 解析显示名为 UUID
+            resolved_id = _resolve_entity_id(conn, 'task', entity_id, project_id)
+            if not resolved_id:
+                return {'ok': False, 'error': f'task not found: {entity_id}'}
+            entity_id = resolved_id
+            
+            # 获取当前行
+            row = conn.execute('SELECT * FROM tasks WHERE id=?', (entity_id,)).fetchone()
             if not row:
                 return {'ok': False, 'error': f'task not found: {entity_id}'}
-            entity_id = row['id']  # 统一使用真实 id（路径里可能是 title）
             
             lines = (row['acceptance'] or '').split('\n')
             n = 0
@@ -469,11 +526,10 @@ def add_log(path, text, changed_by=''):
         
         conn = _wb_conn()
         try:
-            # 检查任务存在（按 id 或 title 查找）
-            row = _get_entity(conn, 'task', entity_id)
-            if not row:
+            # 解析显示名为 UUID
+            entity_id = _resolve_entity_id(conn, 'task', entity_id, project_id)
+            if not entity_id:
                 return {'ok': False, 'error': f'task not found: {entity_id}'}
-            entity_id = row['id']  # 使用真实 id（路径里可能是 title）
             
             # 插入 log_entries
             entry_id = entry.get('id') or f"{int(time.time())}"
@@ -656,12 +712,14 @@ def link_session(task_path=None, project_path=None, sid='', source='plugin', cha
         m = TASK_RE.match(task_path)
         if not m:
             return {'ok': False, 'error': f'bad task_path: {task_path[:120]}'}
-        entity_type, entity_id = 'task', m.group(2)
+        entity_type, entity_id = 'task', m.group(2)  # title
+        project_name = m.group(1)
     elif project_path:
         m = PROJ_RE.match(project_path)
         if not m:
             return {'ok': False, 'error': f'bad project_path: {project_path[:120]}'}
-        entity_type, entity_id = 'project', m.group(1)
+        entity_type, entity_id = 'project', m.group(1)  # name
+        project_name = None
     else:
         return {'ok': False, 'error': 'task_path or project_path required'}
     
@@ -674,11 +732,11 @@ def link_session(task_path=None, project_path=None, sid='', source='plugin', cha
     
     conn = _wb_conn()
     try:
-        # 解析真实 id（路径里可能是 title）
-        row = _get_entity(conn, entity_type, entity_id)
-        if not row:
+        # 解析显示名为 UUID
+        resolved_id = _resolve_entity_id(conn, entity_type, entity_id, project_name)
+        if not resolved_id:
             return {'ok': False, 'error': f'{entity_type} not found: {entity_id}'}
-        entity_id = row['id']
+        entity_id = resolved_id
         
         now = int(time.time())
         added = []

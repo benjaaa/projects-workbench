@@ -153,8 +153,11 @@ def _enrich_task(conn, task):
     task['logs'] = []
     
     # 5. 补充 path 和 dir（plugin.js 依赖）
-    task['path'] = f'{PROOT}/{task["project_id"]}/tasks/任务-{task["id"]}.md'
-    task['dir'] = task['project_id']
+    # UUID 主键后：path 用 title（可改），dir 需要解析项目名
+    proj_row = conn.execute('SELECT name FROM projects WHERE id=?', (task['project_id'],)).fetchone()
+    proj_name = proj_row['name'] if proj_row else task['project_id']
+    task['path'] = f'{PROOT}/{proj_name}/tasks/任务-{task["title"]}.md'
+    task['dir'] = proj_name
     
     # 6. 字段名映射（DB → frontmatter 兼容）
     task['title'] = task.get('title', task['id'])
@@ -190,11 +193,12 @@ def _enrich_project(conn, project):
     project['session_ids'] = ','.join(sids) if sids else ''
     
     # 补充 path 和 dir
-    proj_dir = os.path.join(VAULT, PROOT, project['id'])
+    # UUID 主键后：dir 用 name（可改），不是 id（UUID）
+    proj_dir = os.path.join(VAULT, PROOT, project['name'])
     cands = [f for f in os.listdir(proj_dir) if f.startswith('项目说明-') and f.endswith('.md')] if os.path.exists(proj_dir) else []
-    filename = cands[0] if cands else f'项目说明-{project["id"]}.md'
-    project['path'] = f'{PROOT}/{project["id"]}/{filename}'
-    project['dir'] = project['id']
+    filename = cands[0] if cands else f'项目说明-{project["name"]}.md'
+    project['path'] = f'{PROOT}/{project["name"]}/{filename}'
+    project['dir'] = project['name']
     
     # 字段名映射
     project['title'] = project.get('name', project['id'])

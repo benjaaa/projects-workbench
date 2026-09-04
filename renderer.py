@@ -344,15 +344,19 @@ def render_entity(conn, entity_type, entity_id):
         if entity_type == 'task':
             task, sids, logs = build_task_render_args(conn, entity_id)
             content = render_task(task, sids, logs)
-            path = f'{PROOT}/{task["project_id"]}/tasks/任务-{entity_id}.md'
+            # 用 title 生成文件名（可改），不用 UUID
+            # project_id 是 UUID，需要解析为项目名
+            proj_row = conn.execute('SELECT name FROM projects WHERE id=?', (task['project_id'],)).fetchone()
+            proj_name = proj_row['name'] if proj_row else task['project_id']
+            path = f'{PROOT}/{proj_name}/tasks/任务-{task["title"]}.md'
         elif entity_type == 'project':
             project, sids = build_project_render_args(conn, entity_id)
             content = render_project(project, sids)
-            # 项目说明文件名可能与项目名不同，查找现有文件
-            proj_dir = os.path.join(VAULT, PROOT, entity_id)
+            # 用 name 生成文件名（可改），不用 UUID
+            proj_dir = os.path.join(VAULT, PROOT, project['name'])
             cands = [f for f in os.listdir(proj_dir) if f.startswith('项目说明-') and f.endswith('.md')] if os.path.exists(proj_dir) else []
-            filename = cands[0] if cands else f'项目说明-{entity_id}.md'
-            path = f'{PROOT}/{entity_id}/{filename}'
+            filename = cands[0] if cands else f'项目说明-{project["name"]}.md'
+            path = f'{PROOT}/{project["name"]}/{filename}'
         else:
             return {'ok': False, 'error': f'unknown entity_type: {entity_type}'}
         
