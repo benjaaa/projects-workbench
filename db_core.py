@@ -709,8 +709,12 @@ def _validate_sids(sids, max_retries=3):
     return dead  # 重试后仍无效
 
 
-def link_session(task_path=None, project_path=None, sid='', source='plugin', changed_by=''):
-    """Session 关联到任务/项目（显式绑定）。"""
+def link_session(task_path=None, project_path=None, sid='', source='plugin', changed_by='', skip_validation=False):
+    """Session 关联到任务/项目（显式绑定）。
+
+    Args:
+        skip_validation: 跳过 session 存在性校验（用于刚创建的 session）
+    """
     if not sid:
         return {'ok': False, 'error': 'no sid'}
     
@@ -733,9 +737,10 @@ def link_session(task_path=None, project_path=None, sid='', source='plugin', cha
     else:
         return {'ok': False, 'error': 'task_path or project_path required'}
     
-    dead = _validate_sids(sids)
-    if dead:
-        return {'ok': False, 'error': 'INVALID_SESSION_IDS', 'invalid_sids': dead}
+    if not skip_validation:
+        dead = _validate_sids(sids)
+        if dead:
+            return {'ok': False, 'error': 'INVALID_SESSION_IDS', 'invalid_sids': dead}
     
     table = 'task_sessions' if entity_type == 'task' else 'project_sessions'
     col = 'task_id' if entity_type == 'task' else 'project_id'
@@ -1390,13 +1395,21 @@ def run_db_first(op, spec, if_version=None):
         return toggle_ac(spec['path'], int(spec['idx']), changed_by)
     elif op == 'add_log':
         return add_log(spec['path'], spec['text'], changed_by)
+    elif op == 'edit_yaml_log':
+        return edit_yaml_log(
+            spec.get('path', ''),
+            spec.get('entry_id', ''),
+            spec.get('new_yaml_text', ''),
+            changed_by
+        )
     elif op == 'link_session':
         return link_session(
             task_path=spec.get('task_path'),
             project_path=spec.get('project_path'),
             sid=spec.get('sid', ''),
             source=spec.get('source', 'plugin'),
-            changed_by=changed_by
+            changed_by=changed_by,
+            skip_validation=spec.get('skip_validation', False)
         )
     elif op == 'create_project':
         return create_project(spec['dir'], spec.get('project_content', ''), spec.get('agents_content', ''), changed_by)
@@ -1423,3 +1436,86 @@ def run_db_first(op, spec, if_version=None):
         return repeat_next(spec['path'], changed_by)
     else:
         return {'ok': False, 'error': f'unknown op for db_first: {op}'}
+
+
+def edit_yaml_log(path, entry_id, new_yaml_text, changed_by=''):
+    """编辑 YAML 日志条目（DB 先行）。
+    
+    Args:
+        path: 任务路径
+        entry_id: 日志条目 ID
+        new_yaml_text: 新的 YAML 文本
+        changed_by: 变更来源
+    
+    Returns:
+        dict: {'ok': True, 'version': int} 或 {'ok': False, 'error': str}
+    """
+    try:
+        entity_type, entity_id, project_id = _validate_path(path)
+        if entity_type != 'task':
+            return {'ok': False, 'error': 'edit_yaml_log requires task path'}
+        
+        # 解析新的 YAML 条目
+        entry = _parse_yaml_entry(new_yaml_text)
+        if not entry['date']:
+            return {'ok': False, 'error': 'invalid log entry: missing date'}
+        
+        conn = _wb_conn()
+        try:
+            # 解析显示名为 UUID
+            resolved_id = _resolve_entity_id(conn, 'task', entity_id, project_id)
+            if not resolved_id:
+                return {'ok': False, 'error': f'task not found: {entity_id}'}
+            entity_id = resolved_id
+            
+            # 检查 entry_id 是否属于该任务
+            row = conn.execute(
+                'SELECT id FROM log_entries WHERE id=? AND task_id=?',
+                (entry_id, entity_id)
+            ).fetchone()
+            if not row:
+                return {'ok': False, 'error': f'log entry not found: {entry_id}'}
+            
+            # 更新 log_entries
+            conn.execute(
+                'UPDATE log_entries SET date=?, type=?, summary=?, window=?, updated_at=? WHERE id=?',
+                (entry['date'], entry['type'], entry['summary'], entry.get('window', ''),
+                 int(time.time()), entry_id)
+            )
+            
+            # 删除旧的 detail 和 sessions
+            conn.execute('DELETE FROM log_detail WHERE entry_id=?', (entry_id,))
+            conn.execute('DELETE FROM log_sessions WHERE entry_id=?', (entry_id,))
+            
+            # 插入新的 sessions
+            for s in entry['sessions']:
+                conn.execute(
+                    'INSERT INTO log_sessions(entry_id, sid, source) VALUES(?,?,?)',
+                    (entry_id, s['sid'], s.get('source', ''))
+                )
+            
+            # 插入新的 detail
+            for kind in ('outputs', 'risks', 'pending'):
+                for i, item in enumerate(entry[kind]):
+                    conn.execute(
+                        'INSERT INTO log_detail(entry_id, kind, seq, text) VALUES(?,?,?,?)',
+                        (entry_id, kind, i, item)
+                    )
+            for i, d in enumerate(entry['decisions']):
+                conn.execute(
+                    'INSERT INTO log_detail(entry_id, kind, seq, text, by) VALUES(?,?,?,?,?)',
+                    (entry_id, 'decisions', i, d.get('desc', ''), d.get('by', ''))
+                )
+            
+            _log_change('task', entity_id, 'log_entries', entry_id, 'updated', changed_by)
+            v = _bump_version(conn, 'task', entity_id, changed_by)
+            conn.commit()
+            
+            render_result = _trigger_render('task', entity_id)
+            return {'ok': True, 'version': v, 'db_first': True, **render_result}
+        finally:
+            conn.close()
+    except ValidationError as e:
+        return {'ok': False, 'error': str(e)}
+    except Exception as e:
+        return {'ok': False, 'error': f'{type(e).__name__}: {e}'}

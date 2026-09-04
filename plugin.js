@@ -1612,11 +1612,12 @@ function ChatHome(R) {
         var refText = (att && att.ref_text) || ''
         var promptText = refText ? (refText + '\n\n' + rawText) : rawText
         // P3 DB 真相源：session↔实体映射直接写 workbench.db（frontmatter session_ids 写入通道退役）
+        // skip_validation: 刚创建的 session 可能还没落库 state.db，跳过校验避免 INVALID_SESSION_IDS
         if (issue) {
-          runSpec({ op: 'link_session', task_path: issue.path, sid: storedId, source: 'desktop' })
+          runSpec({ op: 'link_session', task_path: issue.path, sid: storedId, source: 'desktop', skip_validation: true })
             .catch(function(e) { console.error('[pw] link_session failed:', e) })
         } else if (proj && proj.path) {
-          runSpec({ op: 'link_session', project_path: proj.path, sid: storedId, source: 'desktop' })
+          runSpec({ op: 'link_session', project_path: proj.path, sid: storedId, source: 'desktop', skip_validation: true })
             .catch(function(e) { console.error('[pw] link_session(proj) failed:', e) })
         }
         // 注意：不在 create 成功后清空编辑器——loading 期间内容保持冻结（用户要求）
@@ -2826,11 +2827,14 @@ function TaskDetailPage(R) {
     // 乐观更新本地 state（dw/ts），再落盘；成功后刷新保一致
     var updated = Object.assign({}, t, { task_detail: v, body: v })
     R.setDw(updated)
-    var newTs = R.ts[0].slice()
-    for (var i = 0; i < newTs.length; i++) {
-      if (newTs[i].path === t.path) { newTs[i] = Object.assign({}, newTs[i], { task_detail: v, body: v }); break }
+    var taskList = R.ts && R.ts[0]
+    if (taskList && Array.isArray(taskList)) {
+      var newTs = taskList.slice()
+      for (var i = 0; i < newTs.length; i++) {
+        if (newTs[i].path === t.path) { newTs[i] = Object.assign({}, newTs[i], { task_detail: v, body: v }); break }
+      }
+      R.setTs(newTs)
     }
-    R.setTs(newTs)
     R.updateSection(t.path, '任务详情', v)
       .then(function() { R.load() })
       .catch(function(e) { console.error('[pw] updateSection failed:', e); R.load() })
@@ -2880,8 +2884,8 @@ function TaskDetailPage(R) {
     R.setDw(updated)
     setEditingYaml(null)
     runSpec({ op: 'edit_yaml_log', path: t.path, entry_id: entry.entryId, new_yaml_text: yamlText.trimEnd() }).then(function() {
-      tost('已保存')
-    }).catch(function(e) { console.error('[pw] editYamlLog failed:', e); R.setDw(t); tost('保存失败') })
+      R.tost('已保存')
+    }).catch(function(e) { console.error('[pw] editYamlLog failed:', e); R.setDw(t); R.tost('保存失败') })
   }
   function doNewSession() {
     setHandleMenuOpen(false)

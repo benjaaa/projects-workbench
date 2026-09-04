@@ -96,7 +96,7 @@ def main():
         # 路由到写核心
         if op in ('set_property', 'update_section', 'set_body', 'toggle_ac', 'add_log',
                   'link_session', 'create_project', 'create_task', 'delete_task',
-                  'rename_task', 'repeat_next'):
+                  'rename_task', 'repeat_next', 'edit_yaml_log'):
             try:
                 from db_core import run_db_first
                 result = run_db_first(op, spec, if_version=if_version)
@@ -367,6 +367,29 @@ def main():
                 _json_err(f'kanban: {type(e).__name__}: {e}')
             return
         
+        elif op == 'ops_session_by_ids':
+            # 按 sid 列表查询 session 信息
+            try:
+                import sqlite3
+                sids = [s.strip() for s in spec.get('ids', '').split(',') if s.strip()]
+                if not sids:
+                    _json_out({'ok': True, 'sessions': []})
+                    return
+                state_db = os.path.join(os.path.expanduser('~'), '.hermes/profiles/business_analysis/state.db')
+                conn = sqlite3.connect(state_db)
+                conn.row_factory = sqlite3.Row
+                placeholders = ','.join('?' for _ in sids)
+                rows = conn.execute(
+                    f'SELECT id, title, cwd, last_activity_at, message_count, source FROM sessions WHERE id IN ({placeholders})',
+                    sids
+                ).fetchall()
+                conn.close()
+                sessions = [dict(r) for r in rows]
+                _json_out({'ok': True, 'sessions': sessions})
+            except Exception as e:
+                _json_err(f'ops_session_by_ids: {type(e).__name__}: {e}')
+            return
+
         else:
             _json_err(f'unknown op: {op}')
             return
