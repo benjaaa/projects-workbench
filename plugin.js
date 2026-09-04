@@ -4,7 +4,7 @@ import { jsx, jsxs, Fragment } from 'react/jsx-runtime'
 import { useState, useEffect, useRef } from 'react'
 import { cn, host, ROUTES_AREA, SIDEBAR_NAV_AREA, PALETTE_AREA, KEYBINDS_AREA, Codicon } from '@hermes/plugin-sdk'
 
-var ROUTE = '/projects', SCRIPT = '/Users/ben/.hermes/profiles/business_analysis/desktop-plugins/projects-workbench/obsidian-task.py', PROOT = '2. Project/2.1 Project', VAULT = '/Users/ben/Documents/Second Brain/Second Brain'
+var ROUTE = '/projects', SCRIPT = '/Users/ben/.hermes/profiles/business_analysis/desktop-plugins/projects-workbench/workbench-service.py', PROOT = '2. Project/2.1 Project', VAULT = '/Users/ben/Documents/Second Brain/Second Brain'
 // 吉祥物 SVG 资源目录（file:// 绝对路径，img 直接加载）
 var ASSET_DIR = 'file:///Users/ben/.hermes/profiles/business_analysis/desktop-plugins/projects-workbench/assets/'
 // 冷启动默认首页：应用启动时 hash 为空 → 自动导航到项目工作台（标志位防热重载重复触发）
