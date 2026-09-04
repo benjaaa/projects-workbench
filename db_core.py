@@ -199,7 +199,7 @@ class ValidationError(Exception):
 
 
 def _validate_path(path):
-    """校验路径格式，返回 (entity_type, entity_id)。"""
+    """校验路径格式，返回 (entity_type, entity_id, project_id)。"""
     m = TASK_RE.match(path or '')
     if m:
         return 'task', m.group(2), m.group(1)  # task_id, project_id
@@ -207,6 +207,21 @@ def _validate_path(path):
     if m:
         return 'project', m.group(1), m.group(1)
     raise ValidationError(f'invalid path: {path[:120]}')
+
+
+def _resolve_task_id(conn, path_id):
+    """将路径中的任务名解析为 DB 中的真实 id。
+
+    路径中的名字可能是 id 也可能是 title（任务被重命名后两者分叉）。
+    先按 id 查，找不到则按 title 查。
+    """
+    row = conn.execute('SELECT id FROM tasks WHERE id=?', (path_id,)).fetchone()
+    if row:
+        return row['id']
+    row = conn.execute('SELECT id FROM tasks WHERE title=?', (path_id,)).fetchone()
+    if row:
+        return row['id']
+    return None
 
 
 def _validate_field(entity_type, field):
@@ -230,9 +245,17 @@ def _validate_priority(value):
 
 
 def _get_entity(conn, entity_type, entity_id):
-    """获取实体行，不存在返回 None。"""
+    """获取实体行，不存在返回 None。
+
+    task 类型时支持 id 或 title 查找（任务重命名后 id 与 title 分叉，
+    路径中的名字可能是 title）。
+    """
     table = 'tasks' if entity_type == 'task' else 'projects'
-    return conn.execute(f'SELECT * FROM {table} WHERE id=?', (entity_id,)).fetchone()
+    row = conn.execute(f'SELECT * FROM {table} WHERE id=?', (entity_id,)).fetchone()
+    if row or entity_type != 'task':
+        return row
+    # task fallback: 按 title 查
+    return conn.execute('SELECT * FROM tasks WHERE title=?', (entity_id,)).fetchone()
 
 
 def _bump_version(conn, entity_type, entity_id, changed_by=''):
@@ -274,6 +297,7 @@ def set_property(path, field, value, if_version=None, changed_by=''):
             row = _get_entity(conn, entity_type, entity_id)
             if not row:
                 return {'ok': False, 'error': f'{entity_type} not found: {entity_id}'}
+            entity_id = row['id']  # 统一使用真实 id（路径里可能是 title）
             if if_version is not None and (row['version'] or 1) != int(if_version):
                 return {'ok': False, 'error': 'VERSION_CONFLICT', 'current_version': row['version'] or 1}
             
@@ -331,6 +355,7 @@ def update_section(path, section, text, if_version=None, changed_by=''):
             row = _get_entity(conn, entity_type, entity_id)
             if not row:
                 return {'ok': False, 'error': f'{entity_type} not found: {entity_id}'}
+            entity_id = row['id']  # 统一使用真实 id（路径里可能是 title）
             if if_version is not None and (row['version'] or 1) != int(if_version):
                 return {'ok': False, 'error': 'VERSION_CONFLICT', 'current_version': row['version'] or 1}
             
@@ -377,6 +402,7 @@ def toggle_ac(path, idx, changed_by=''):
             row = _get_entity(conn, 'task', entity_id)
             if not row:
                 return {'ok': False, 'error': f'task not found: {entity_id}'}
+            entity_id = row['id']  # 统一使用真实 id（路径里可能是 title）
             
             lines = (row['acceptance'] or '').split('\n')
             n = 0
@@ -443,10 +469,11 @@ def add_log(path, text, changed_by=''):
         
         conn = _wb_conn()
         try:
-            # 检查任务存在
+            # 检查任务存在（按 id 或 title 查找）
             row = _get_entity(conn, 'task', entity_id)
             if not row:
                 return {'ok': False, 'error': f'task not found: {entity_id}'}
+            entity_id = row['id']  # 使用真实 id（路径里可能是 title）
             
             # 插入 log_entries
             entry_id = entry.get('id') or f"{int(time.time())}"
@@ -647,6 +674,12 @@ def link_session(task_path=None, project_path=None, sid='', source='plugin', cha
     
     conn = _wb_conn()
     try:
+        # 解析真实 id（路径里可能是 title）
+        row = _get_entity(conn, entity_type, entity_id)
+        if not row:
+            return {'ok': False, 'error': f'{entity_type} not found: {entity_id}'}
+        entity_id = row['id']
+        
         now = int(time.time())
         added = []
         for sid_item in sids:
@@ -742,49 +775,70 @@ def create_task(project_id, title, goal='', task_detail='', acceptance='', prior
 
 
 def delete_task(path, changed_by=''):
-    """删除任务（DB 先行，文件由渲染器删除）。
-    
+    """删除任务（DB 与文件剥离：各自独立删除，互不阻塞）。
+
     Args:
         path: 任务路径
         changed_by: 变更来源
-    
+
     Returns:
-        dict: {'ok': True} 或 {'ok': False, 'error': str}
+        dict: {'ok': True, 'db_deleted': bool, 'file_deleted': bool}
+              或 {'ok': False, 'error': str}（仅当路径解析失败时）
     """
     try:
         entity_type, entity_id, project_id = _validate_path(path)
         if entity_type != 'task':
             return {'ok': False, 'error': 'delete_task requires task path'}
-        
+
+        db_deleted = False
+        file_deleted = False
+        db_error = None
+        file_error = None
+
+        # ─── DB 删除（独立事务）───────────────────────────
         conn = _wb_conn()
         try:
             row = _get_entity(conn, 'task', entity_id)
-            if not row:
-                return {'ok': False, 'error': f'task not found: {entity_id}'}
-            
-            # 删除关联数据（外键级联）
-            conn.execute('DELETE FROM task_sessions WHERE task_id=?', (entity_id,))
-            conn.execute('DELETE FROM log_sessions WHERE entry_id IN (SELECT id FROM log_entries WHERE task_id=?)', (entity_id,))
-            conn.execute('DELETE FROM log_detail WHERE entry_id IN (SELECT id FROM log_entries WHERE task_id=?)', (entity_id,))
-            conn.execute('DELETE FROM log_entries WHERE task_id=?', (entity_id,))
-            conn.execute('DELETE FROM documents WHERE entity_type=? AND entity_id=?', ('task', entity_id))
-            conn.execute('DELETE FROM tasks WHERE id=?', (entity_id,))
-            
-            _log_change('task', entity_id, 'deleted', row['title'], None, changed_by)
-            conn.commit()
-            
-            # 删除文件
-            file_path = os.path.join(VAULT, path)
-            if os.path.exists(file_path):
-                try:
-                    os.unlink(file_path)
-                except Exception:
-                    pass  # 文件删除失败不阻塞
-            
-            _log_op(changed_by or 'plugin', 'delete_task', 'task', entity_id, f'删除任务「{row["title"]}」')
-            return {'ok': True}
+            if row:
+                title = row['title'] if hasattr(row, 'keys') else entity_id
+                conn.execute('DELETE FROM task_sessions WHERE task_id=?', (entity_id,))
+                conn.execute('DELETE FROM log_sessions WHERE entry_id IN (SELECT id FROM log_entries WHERE task_id=?)', (entity_id,))
+                conn.execute('DELETE FROM log_detail WHERE entry_id IN (SELECT id FROM log_entries WHERE task_id=?)', (entity_id,))
+                conn.execute('DELETE FROM log_entries WHERE task_id=?', (entity_id,))
+                conn.execute('DELETE FROM documents WHERE entity_type=? AND entity_id=?', ('task', entity_id))
+                conn.execute('DELETE FROM tasks WHERE id=?', (entity_id,))
+                _log_change('task', entity_id, 'deleted', title, None, changed_by)
+                conn.commit()
+                db_deleted = True
+        except Exception as e:
+            db_error = f'{type(e).__name__}: {e}'
         finally:
             conn.close()
+
+        # ─── 文件删除（独立操作）───────────────────────────
+        file_path = os.path.join(VAULT, path)
+        if os.path.exists(file_path):
+            try:
+                os.unlink(file_path)
+                file_deleted = True
+            except Exception as e:
+                file_error = f'{type(e).__name__}: {e}'
+
+        # ─── 结果汇总 ────────────────────────────────────
+        if db_error or file_error:
+            parts = []
+            if db_error:
+                parts.append(f'DB: {db_error}')
+            if file_error:
+                parts.append(f'file: {file_error}')
+            return {'ok': False, 'error': '; '.join(parts), 'db_deleted': db_deleted, 'file_deleted': file_deleted}
+
+        if not db_deleted and not file_deleted:
+            return {'ok': False, 'error': f'task not found in DB and file not exists: {entity_id}'}
+
+        _log_op(changed_by or 'plugin', 'delete_task', 'task', entity_id,
+                f'删除任务「{entity_id}」（db={db_deleted}, file={file_deleted}）')
+        return {'ok': True, 'db_deleted': db_deleted, 'file_deleted': file_deleted}
     except Exception as e:
         return {'ok': False, 'error': f'{type(e).__name__}: {e}'}
 
