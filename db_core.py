@@ -192,6 +192,50 @@ def _queue_render_retry(entity_type, entity_id, error):
         pass
 
 
+def _process_render_queue(max_retries=3):
+    """处理渲染重试队列：重试 → 成功删除 / 超上限标记死信。
+
+    策略：
+    - retry_count < max_retries: 重试，成功则删除记录，失败则 retry_count+1
+    - retry_count >= max_retries: 标记为死信（error 加前缀），保留记录供人工排查
+    """
+    try:
+        import renderer
+        wb_conn = _wb_conn()
+        log_conn = _log_conn()
+        try:
+            rows = log_conn.execute(
+                'SELECT id, entity_type, entity_id, retry_count FROM render_queue ORDER BY created_at'
+            ).fetchall()
+            for row in rows:
+                qid, etype, eid, rc = row['id'], row['entity_type'], row['entity_id'], row['retry_count']
+                if rc >= max_retries:
+                    # 标记死信：error 加前缀，不再重试
+                    log_conn.execute(
+                        "UPDATE render_queue SET error = '[DEAD] ' || error WHERE id = ?",
+                        (qid,)
+                    )
+                    log_conn.commit()
+                    continue
+                # 尝试重试
+                result = renderer.render_entity(wb_conn, etype, eid)
+                if result.get('ok'):
+                    # 成功：删除队列记录
+                    log_conn.execute('DELETE FROM render_queue WHERE id = ?', (qid,))
+                else:
+                    # 失败：更新重试计数
+                    log_conn.execute(
+                        'UPDATE render_queue SET retry_count = retry_count + 1, last_retry_at = ?, error = ? WHERE id = ?',
+                        (int(time.time()), result.get('error', ''), qid)
+                    )
+                log_conn.commit()
+        finally:
+            wb_conn.close()
+            log_conn.close()
+    except Exception:
+        pass
+
+
 # ─── 校验 ─────────────────────────────────────────────────────
 
 class ValidationError(Exception):
