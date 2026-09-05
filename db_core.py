@@ -873,14 +873,15 @@ def delete_task(path, changed_by=''):
         try:
             row = _get_entity(conn, 'task', entity_id)
             if row:
+                real_id = row['id']  # 归一化为真实 UUID，后续删除用 real_id
                 title = row['title'] if hasattr(row, 'keys') else entity_id
-                conn.execute('DELETE FROM task_sessions WHERE task_id=?', (entity_id,))
-                conn.execute('DELETE FROM log_sessions WHERE entry_id IN (SELECT id FROM log_entries WHERE task_id=?)', (entity_id,))
-                conn.execute('DELETE FROM log_detail WHERE entry_id IN (SELECT id FROM log_entries WHERE task_id=?)', (entity_id,))
-                conn.execute('DELETE FROM log_entries WHERE task_id=?', (entity_id,))
-                conn.execute('DELETE FROM documents WHERE entity_type=? AND entity_id=?', ('task', entity_id))
-                conn.execute('DELETE FROM tasks WHERE id=?', (entity_id,))
-                _log_change('task', entity_id, 'deleted', title, None, changed_by)
+                conn.execute('DELETE FROM task_sessions WHERE task_id=?', (real_id,))
+                conn.execute('DELETE FROM log_sessions WHERE entry_id IN (SELECT id FROM log_entries WHERE task_id=?)', (real_id,))
+                conn.execute('DELETE FROM log_detail WHERE entry_id IN (SELECT id FROM log_entries WHERE task_id=?)', (real_id,))
+                conn.execute('DELETE FROM log_entries WHERE task_id=?', (real_id,))
+                conn.execute('DELETE FROM documents WHERE entity_type=? AND entity_id=?', ('task', real_id))
+                conn.execute('DELETE FROM tasks WHERE id=?', (real_id,))
+                _log_change('task', real_id, 'deleted', title, None, changed_by)
                 conn.commit()
                 db_deleted = True
         except Exception as e:
@@ -1031,11 +1032,15 @@ def repeat_next(path, changed_by=''):
             base_title = re.sub(r'\s+\d{4}-\d{2}-\d{2}\s*$', '', row['title']).strip()
             new_title = f'{base_title} {next_due_str}'
             
-            # 检查是否已存在
-            existing = conn.execute('SELECT id FROM tasks WHERE id=?', (new_title,)).fetchone()
+            # 检查是否已存在（按 title + project 查，允许同名任务在不同项目）
+            existing = conn.execute('SELECT id FROM tasks WHERE project_id=? AND title=?', (project_id, new_title)).fetchone()
             if existing:
                 return {'ok': False, 'error': 'EXISTS'}
-            
+
+            # 生成 UUID 主键（与 title 解耦）
+            import uuid
+            new_task_id = uuid.uuid4().hex[:12]
+
             # 创建新任务（复制原任务字段，重置状态）
             now = int(time.time())
             conn.execute('''INSERT INTO tasks(
@@ -1045,20 +1050,20 @@ def repeat_next(path, changed_by=''):
                 repeat_mode, repeat_unit, repeat_every, repeat_day, repeat_anchor,
                 created_at, updated_at
             ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''', (
-                new_title, project_id, new_title, 'open', row['priority'], row['handler'],
+                new_task_id, project_id, new_title, 'open', row['priority'], row['handler'],
                 None, _date_to_ts(next_due_str), None, 1,
                 row['goal'], row['body'], row['acceptance'],
                 row['repeat_mode'], row['repeat_unit'], row['repeat_every'], row['repeat_day'], next_due_str,
                 now, now
             ))
-            _log_change('task', new_title, 'created', None, new_title, changed_by)
+            _log_change('task', new_task_id, 'created', None, new_title, changed_by)
             conn.commit()
-            
+
             # 触发渲染
-            _trigger_render('task', new_title)
-            
-            _log_op(changed_by or 'plugin', 'repeat_next', 'task', new_title, f'重复任务「{base_title}」生成下一周期')
-            return {'ok': True, 'title': new_title, 'due': next_due_str}
+            _trigger_render('task', new_task_id)
+
+            _log_op(changed_by or 'plugin', 'repeat_next', 'task', new_task_id, f'重复任务「{base_title}」生成下一周期')
+            return {'ok': True, 'title': new_title, 'task_id': new_task_id, 'due': next_due_str}
         finally:
             conn.close()
     except Exception as e:

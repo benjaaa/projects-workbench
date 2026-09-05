@@ -1046,15 +1046,14 @@ function useReducer(initialView) {
     if (nt === t.title) { setDw(Object.assign({}, t)); return }
     runSpec({ op: 'rename_task', path: t.path, new_title: nt }).then(function(r) {
       // 更新 UI 状态：title + path（若文件名变了）
-      var updated = Object.assign({}, t, { title: nt })
-      if (r && r.path) updated.path = r.path
+      var newPath = (r && r.new_path) || (r && r.path) || t.path
+      var updated = Object.assign({}, t, { title: nt, path: newPath })
       // 关键：更新 dw 为改名后的任务，确保第二次改名时路径正确
       setDw(updated)
       var newTs = ts[0].slice()
       for (var i = 0; i < newTs.length; i++) {
         if (newTs[i].path === t.path || newTs[i].id === t.id) {
-          newTs[i] = Object.assign({}, newTs[i], { title: nt })
-          if (r && r.path) newTs[i].path = r.path
+          newTs[i] = Object.assign({}, newTs[i], { title: nt, path: newPath })
         }
       }
       setTs(newTs)
