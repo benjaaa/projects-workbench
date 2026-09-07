@@ -10,3 +10,4 @@ __pycache__/
 *.db-shm
 *.db-wal
 ops-log.db
+workbench.db.backup-*
