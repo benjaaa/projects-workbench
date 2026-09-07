@@ -39,7 +39,12 @@ SECTION_FIELD = {'目标': 'goal', '任务详情': 'body', '验收标准': 'acce
 # 合法枚举值
 VALID_PROJECT_STATUSES = {'open', 'In-Progress', 'Waiting', 'Routine', 'Done', 'Dropped'}
 VALID_TASK_STATUSES = {'open', 'In-Progress', 'Waiting', 'Agent', 'Review', 'Done', 'Dropped'}
+VALID_DRAFT_STATUSES = {'open', 'archived'}
 VALID_PRIORITIES = {'p0', 'p1', 'p2'}
+
+# Inbox 收集箱（draft）目录：与项目目录平行，独立实体，不进 tasks 表
+INBOX_DIR = '2. Project/Inbox'
+DRAFT_RE = re.compile(r'^2\. Project/Inbox/(.+)\.md$')
 
 
 def _ts_to_date(ts):
@@ -107,6 +112,208 @@ def _ensure_log_tables(conn):
     conn.execute('CREATE INDEX IF NOT EXISTS idx_ops_time ON ops_log(created_at)')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_change_entity ON change_log(entity_type, entity_id, changed_at)')
     conn.commit()
+
+
+# ─── Inbox 收集箱（draft）：独立实体，与 tasks 完全隔离 ──────────
+
+def _ensure_draft_table(conn):
+    """确保 drafts 表存在（draft=信息不完整、尚未立项的暂存条目）。"""
+    conn.execute('''CREATE TABLE IF NOT EXISTS drafts (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL UNIQUE,
+        body TEXT DEFAULT '',
+        ts INTEGER,
+        status TEXT DEFAULT 'open',
+        converted_task_id TEXT DEFAULT '',
+        created_at INTEGER,
+        updated_at INTEGER,
+        version INTEGER DEFAULT 1
+    )''')
+
+
+def create_draft(title, body='', changed_by=''):
+    """创建收集箱条目（DB 先行，文件由渲染投影到 2. Project/Inbox/）。
+
+    Returns:
+        dict: {'ok': True, 'draft_id': str, 'path': str} 或 {'ok': False, 'error': str}
+    """
+    try:
+        title = (title or '').strip() or '未命名'
+        conn = _wb_conn()
+        try:
+            _ensure_draft_table(conn)
+            # 同名去重：已存在则直接返回现有条目（幂等）
+            row = conn.execute('SELECT id, status FROM drafts WHERE title=?', (title,)).fetchone()
+            if row:
+                return {'ok': True, 'draft_id': row['id'], 'existed': True,
+                        'path': f'{INBOX_DIR}/{title}.md'}
+            import uuid
+            draft_id = uuid.uuid4().hex[:12]
+            now = int(time.time())
+            conn.execute('''INSERT INTO drafts(id, title, body, ts, status, created_at, updated_at, version)
+                VALUES(?,?,?,?,?,?,?,?)''', (draft_id, title, body, now, 'open', now, now, 1))
+            conn.execute('''INSERT OR REPLACE INTO documents(entity_type, entity_id, doc_type, path, updated_at)
+                VALUES(?,?,?,?,?)''', ('draft', draft_id, 'main', f'{INBOX_DIR}/{title}.md', now))
+            _log_change('draft', draft_id, 'created', None, draft_id, changed_by)
+            conn.commit()
+            _trigger_render('draft', draft_id)
+            _log_op(changed_by or 'plugin', 'inbox_create', 'draft', draft_id, f'创建收集「{title}」')
+            return {'ok': True, 'draft_id': draft_id, 'path': f'{INBOX_DIR}/{title}.md'}
+        finally:
+            conn.close()
+    except Exception as e:
+        return {'ok': False, 'error': f'{type(e).__name__}: {e}'}
+
+
+def list_drafts(include_archived=True):
+    """列出收集箱条目（按 ts 倒序），输出形状与旧 inbox_list 文件扫描版一致。
+
+    Returns:
+        dict: {'ok': True, 'items': [{'name','path','title','ts','first','content','draft_id','status'}]}
+    """
+    try:
+        conn = _wb_conn()
+        try:
+            _ensure_draft_table(conn)
+            sql = 'SELECT * FROM drafts'
+            if not include_archived:
+                sql += " WHERE status='open'"
+            sql += ' ORDER BY ts DESC'
+            rows = conn.execute(sql).fetchall()
+            items = []
+            for r in rows:
+                body = r['body'] or ''
+                first = body.strip().split('\n')[0] if body.strip() else ''
+                # ts 保持 ISO 字符串形状（与旧版 frontmatter ts 一致）
+                ts_str = ''
+                if r['ts']:
+                    from datetime import datetime
+                    ts_str = datetime.fromtimestamp(r['ts']).strftime('%Y-%m-%dT%H:%M')
+                content = _render_draft_md(r)
+                items.append({
+                    'name': r['title'], 'path': f'{INBOX_DIR}/{r["title"]}.md',
+                    'title': r['title'], 'ts': ts_str, 'first': first,
+                    'content': content, 'draft_id': r['id'], 'status': r['status']
+                })
+            return {'ok': True, 'items': items}
+        finally:
+            conn.close()
+    except Exception as e:
+        return {'ok': False, 'error': f'{type(e).__name__}: {e}', 'items': []}
+
+
+def _render_draft_md(row):
+    """渲染 draft 的 md 投影（frontmatter + 正文）。"""
+    from datetime import datetime
+    lines = ['---', f'title: {row["title"]}']
+    if row['ts']:
+        lines.append(f'ts: {datetime.fromtimestamp(row["ts"]).strftime("%Y-%m-%dT%H:%M")}')
+    lines.append(f'status: {row["status"] or "open"}')
+    lines.append('---')
+    lines.append('')
+    lines.append(row['body'] or '')
+    return '\n'.join(lines)
+
+
+def delete_draft(draft_id_or_title, changed_by=''):
+    """删除收集箱条目（DB 记录 + 物理文件，各自独立互不阻塞）。
+
+    Returns:
+        dict: {'ok': True, 'db_deleted': bool, 'file_deleted': bool} 或 {'ok': False, ...}
+    """
+    try:
+        conn = _wb_conn()
+        db_deleted = False
+        file_deleted = False
+        try:
+            _ensure_draft_table(conn)
+            row = conn.execute('SELECT * FROM drafts WHERE id=?', (draft_id_or_title,)).fetchone()
+            if not row:
+                row = conn.execute('SELECT * FROM drafts WHERE title=?', (draft_id_or_title,)).fetchone()
+            if row:
+                real_id = row['id']
+                title = row['title']
+                conn.execute('DELETE FROM documents WHERE entity_type=? AND entity_id=?', ('draft', real_id))
+                conn.execute('DELETE FROM drafts WHERE id=?', (real_id,))
+                _log_change('draft', real_id, 'deleted', title, None, changed_by)
+                conn.commit()
+                db_deleted = True
+            else:
+                title = draft_id_or_title
+        finally:
+            conn.close()
+
+        file_path = os.path.join(VAULT, INBOX_DIR, f'{title}.md')
+        if os.path.exists(file_path):
+            try:
+                os.unlink(file_path)
+                file_deleted = True
+            except Exception:
+                pass
+
+        if not db_deleted and not file_deleted:
+            return {'ok': False, 'error': f'draft not found: {draft_id_or_title}'}
+        _log_op(changed_by or 'plugin', 'inbox_delete', 'draft', draft_id_or_title,
+                f'删除收集「{title}」（db={db_deleted}, file={file_deleted}）')
+        return {'ok': True, 'db_deleted': db_deleted, 'file_deleted': file_deleted}
+    except Exception as e:
+        return {'ok': False, 'error': f'{type(e).__name__}: {e}'}
+
+
+def convert_draft(draft_id_or_title, project_id, changed_by=''):
+    """draft 立项为正式任务：create_task → 文件移入项目 tasks/ → draft 置 archived 留痕。
+
+    Returns:
+        dict: {'ok': True, 'task_id': str, 'task_path': str} 或 {'ok': False, 'error': str}
+    """
+    try:
+        conn = _wb_conn()
+        try:
+            _ensure_draft_table(conn)
+            row = conn.execute('SELECT * FROM drafts WHERE id=?', (draft_id_or_title,)).fetchone()
+            if not row:
+                row = conn.execute('SELECT * FROM drafts WHERE title=?', (draft_id_or_title,)).fetchone()
+            if not row:
+                return {'ok': False, 'error': f'draft not found: {draft_id_or_title}'}
+            if row['status'] == 'archived':
+                return {'ok': False, 'error': f'draft 已归档（converted_task_id={row["converted_task_id"]}）'}
+            draft_id = row['id']
+            draft_title = row['title']
+            draft_body = row['body'] or ''
+        finally:
+            conn.close()
+
+        # 创建正式任务（复用现有 create_task，body 带入 draft 正文）
+        result = create_task(project_id, draft_title, task_detail=draft_body, changed_by=changed_by)
+        if not result.get('ok'):
+            return result
+        task_id = result['task_id']
+
+        # 更新 draft：archived + converted_task_id
+        conn = _wb_conn()
+        try:
+            now = int(time.time())
+            conn.execute('UPDATE drafts SET status=?, converted_task_id=?, updated_at=?, version=version+1 WHERE id=?',
+                         ('archived', task_id, now, draft_id))
+            _log_change('draft', draft_id, 'status', 'open', 'archived', changed_by)
+            _log_change('draft', draft_id, 'converted_task_id', None, task_id, changed_by)
+            conn.commit()
+        finally:
+            conn.close()
+
+        # 删除 Inbox 下的旧文件（任务文件已由 create_task 渲染到项目 tasks/）
+        old_file = os.path.join(VAULT, INBOX_DIR, f'{draft_title}.md')
+        if os.path.exists(old_file):
+            try:
+                os.unlink(old_file)
+            except Exception:
+                pass
+
+        _log_op(changed_by or 'plugin', 'draft_convert', 'draft', draft_id,
+                f'收集「{draft_title}」立项为任务 {task_id}')
+        return {'ok': True, 'task_id': task_id, 'draft_id': draft_id}
+    except Exception as e:
+        return {'ok': False, 'error': f'{type(e).__name__}: {e}'}
 
 
 # ─── 日志写入 ─────────────────────────────────────────────────

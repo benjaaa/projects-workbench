@@ -172,7 +172,9 @@ function runSpec(spec) {
     return r
   })
 }
-function editLog(path, idx, text) { return runSpec({ op: 'edit_log', path: path, idx: idx, text: text }) }
+// editLog 已废弃：旧格式推进记录（- date text 行）不再支持编辑，统一走 YAML 条目（edit_yaml_log）
+// 保留函数签名避免调用方报错，但不再执行任何写操作
+function editLog(path, idx, text) { return Promise.resolve({ ok: false, error: 'edit_log op deprecated: use edit_yaml_log for YAML entries' }) }
 
 // ─── Maps ────────────────────────────────────────────────
 var ST = { open: '待办', 'In-Progress': '进行中', Waiting: '等待中', Done: '已完成', Dropped: '已取消' }
@@ -654,6 +656,7 @@ function useReducer(initialView) {
                 // 将 worker session 关联到项目目录（更新 cwd → 支持 resume + AGENTS.md + 项目会话列表）
                 runSpec({ op: 'kanban_link_session', task_id: t.kanban_task_id, worker_session_id: wr.worker_session_id, board: 'default' }).catch(function(e) { console.error('[pw] kanban_link_session failed:', e) })
                 // 自动写推进记录：kanban worker 完成（YAML schema，跨 agent 可读）
+                // 走 add_log op（DB 先行），不再直接改写文件
                 var now = new Date()
                 var p2 = function(n) { return (n < 10 ? '0' : '') + n }
                 var logDate = p2(now.getMonth() + 1) + '-' + p2(now.getDate()) + ' ' + p2(now.getHours()) + ':' + p2(now.getMinutes()) + ':' + p2(now.getSeconds())
@@ -667,29 +670,7 @@ function useReducer(initialView) {
                   + '      source: kanban\n'
                   + '  pending:\n'
                   + '    - 待人为确认\n'
-                runSpec({ op: 'read', path: t.path }).then(function(o) {
-                  var c = o.content || ''
-                  var re = /(## 推进记录\n[\s\S]*?)(\n## |$)/
-                  var m = c.match(re)
-                  if (m) {
-                    var section = m[1]
-                    // 检查是否已有 YAML 围栏块
-                    var yamlFenceRe = /```yaml\n([\s\S]*?)```/
-                    var yamlMatch = section.match(yamlFenceRe)
-                    var newSection
-                    if (yamlMatch) {
-                      // 已有 YAML 块：在块内末尾追加条目
-                      var yamlContent = yamlMatch[1].trimEnd()
-                      var newYamlContent = yamlContent + '\n' + yamlEntry.trimEnd()
-                      newSection = section.replace(yamlFenceRe, '```yaml\n' + newYamlContent + '\n```')
-                    } else {
-                      // 无 YAML 块：新建围栏块
-                      newSection = section.trimEnd() + '\n```yaml\n' + yamlEntry.trimEnd() + '\n```\n'
-                    }
-                    var newContent = c.replace(re, newSection + m[2])
-                    runSpec({ op: 'write', path: t.path, content: newContent }).catch(function(e) { console.error('[pw] auto log write failed:', e) })
-                  }
-                }).catch(function(e) { console.error('[pw] auto log read failed:', e) })
+                runSpec({ op: 'add_log', path: t.path, text: yamlEntry.trimEnd() }).catch(function(e) { console.error('[pw] add_log failed:', e) })
               }
             }).catch(function(e) { console.error('[pw] kanban_worker_session failed:', e) })
             // 刷新任务列表
@@ -2730,17 +2711,24 @@ function InboxDetail(R) {
     // 先弹出确认（Modal inbox-del 分支），确认后才真正删除
     R.setMd('inbox-del')
   }
+  function goConvert() {
+    // 弹出项目选择（Modal inbox-convert 分支），确认后立项为正式任务
+    R.setMd('inbox-convert')
+  }
+  var isArchived = item.status === 'archived'
   return jsxs(Fragment, { children: [
     jsx('div', { 'data-pw': '1', className: S.page, style: { background: PAGE }, children: jsxs('div', { className: S.wrap, children: jsxs('div', { style: { maxWidth: '720px', margin: '0 auto', paddingTop: '24px' }, children: [
       jsxs('div', { className: 'flex items-baseline gap-3 mb-6', children: [
         jsx('span', { className: 'text-[0.8125rem] cursor-pointer transition-colors', style: { color: MUT }, onClick: function() { R.setVw('inbox') }, children: '← Inbox' }),
         jsx('span', { className: S.h1, style: { color: INK }, children: item.title || 'Inbox 收集' }),
+        isArchived && jsx('span', { className: 'text-[0.625rem] font-medium px-2 py-0.5 rounded-full', style: { background: HOV, color: MUT }, children: '已归档' }),
       ]}),
       jsxs('div', { className: 'overflow-hidden rounded-[10px] bg-surface', style: { boxShadow: SH_CARD }, children: [
         jsxs('div', { className: 'flex items-center justify-between px-4 py-3', style: { borderBottom: '1px solid ' + LINE }, children: [
           jsx('span', { className: 'text-[0.6875rem]', style: { color: FAINT }, children: (item.ts || '').slice(0, 10) }),
           jsxs('div', { className: 'flex items-center gap-2', children: [
             jsx('span', { className: 'inline-flex items-center text-[0.6875rem] font-medium px-2.5 cursor-pointer select-none transition-colors hover:bg-[#f4f5f6] border border-[#e5e5e5]', style: { color: DANGER, borderRadius: '8px', height: '24px', lineHeight: '24px' }, onClick: doDelete, children: '删除' }),
+            !isArchived && jsx('span', { className: 'inline-flex items-center text-[0.6875rem] font-medium px-2.5 cursor-pointer select-none transition-colors hover:bg-[#f4f5f6] border border-[#e5e5e5]', style: { color: BODY, borderRadius: '8px', height: '24px', lineHeight: '24px' }, onClick: goConvert, children: '转为任务' }),
             jsx(Btn, { onClick: goHandle, children: '去处理 →' }),
           ]}),
         ]}),
@@ -2865,7 +2853,10 @@ function TaskDetailPage(R) {
     var inp = document.getElementById('logEditInput' + i)
     if (!inp) { setLogEdit(-1); return }
     var v = inp.value.trim()
-    if (v) { setForce(force + 1); editLog(t.path, i, v).catch(function(e) { console.error('[pw] editLog failed:', e); R.load() }) }
+    if (v) {
+      // 旧格式推进记录不再支持编辑（edit_log op 已废弃），提示用户走 YAML 条目
+      R.tost('旧格式推进记录不支持编辑，请使用 YAML 条目编辑')
+    }
     setLogEdit(-1)
   }
   function doReviewResumeSess(sid) {
@@ -3423,6 +3414,32 @@ function Modal(R) {
     return modalShell('删除这条收集？', null, [
       jsx('div', { key: 'd1', className: 'text-[0.8125rem]', style: { color: BODY, lineHeight: 1.7 }, children: '「' + (delItem.title || '未命名') + '」将被永久删除，不可恢复。' }),
     ], confirmDel, '确认删除')
+  }
+
+  // Inbox 转为任务：选择目标项目
+  if (R.md === 'inbox-convert') {
+    var cvItem = (R.dw && R.dw.item) || {}
+    var openPs = (R.ps || []).filter(function(p) { return p.status !== 'Done' && p.status !== 'Dropped' })
+    function confirmConvert() {
+      var pname = document.getElementById('cvProject').value
+      if (!pname) { R.tost('请选择项目'); return }
+      runSpec({ op: 'draft_convert', draft_id: cvItem.draft_id || cvItem.title, title: cvItem.title, project_id: pname }).then(function(r) {
+        if (r && r.ok) {
+          R.setMd(null)
+          R.setDw(null)
+          R.setSel(null)
+          R.tost('已立项为任务「' + (cvItem.title || '') + '」')
+          R.setVw('inbox')
+          R.load && R.load()
+        } else {
+          R.tost('立项失败: ' + ((r && r.error) || '未知错误'))
+        }
+      }).catch(function(e) { console.error('[pw] draft_convert failed:', e); R.tost('立项失败') })
+    }
+    return modalShell('转为任务', '选择立项到的项目', [
+      jsx('div', { key: 'c0', className: 'text-[0.8125rem] mb-3', style: { color: BODY, lineHeight: 1.7 }, children: '「' + (cvItem.title || '未命名') + '」将在所选项目下创建正式任务，原收集条目归档留痕。' }),
+      jsx(ModalField, { key: 'c1', label: '目标项目', children: jsx(Sel, { id: 'cvProject', defaultValue: openPs[0] ? openPs[0].title : '', options: openPs.map(function(p) { return [p.title, p.title] }) }) }),
+    ], confirmConvert, '立项为任务')
   }
 
   var pjn = R.pj(R.sel)

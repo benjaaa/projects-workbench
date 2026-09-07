@@ -3,15 +3,18 @@
 
 职责：
 - 从 DB 行渲染 Markdown 文档（项目/任务）
+- 区段级合并：受管区段由 DB 刷新，自由章节原样保留
 - 写入文件（osascript cp 绕 TCC）
 - 无 DB 写入，无副作用（除文件写入）
 
 设计原则：
 - 纯函数：render_project / render_task 输入 DB 行，输出字符串
+- 区段合并：merge_sections(existing, managed_new) 做受管节替换、自由节保留
 - 写文件独立：write_rendered 有副作用，单独隔离
-- 可测试：render 函数可单元测试，无需 DB 连接
+- 可测试：render 与 merge 函数可单元测试，无需 DB 连接
 """
 import os
+import re
 import subprocess
 import tempfile
 
@@ -29,6 +32,84 @@ def _ts_to_date(ts):
         return datetime.fromtimestamp(ts).strftime('%Y-%m-%d')
     except Exception:
         return ''
+
+
+# ─── 区段合并（受管节覆盖、自由节保留）────────────────────────
+
+def _split_frontmatter(text):
+    """切出 frontmatter 与正文。返回 (frontmatter_str, body_str)。
+    frontmatter_str 含 --- 包裹行；无 frontmatter 时返回 ('', text)。
+    """
+    m = re.match(r'^(---\n[\s\S]*?\n---\n)([\s\S]*)$', text)
+    if m:
+        return m.group(1), m.group(2)
+    return '', text
+
+
+def _split_h2_sections(body):
+    """把正文按 H2 标题切片。
+    返回 (h1_block, sections)：
+      h1_block = H1 标题块（含其下直到第一个 H2 前的内容），可为空串
+      sections = [(title, full_text)]，title 为 ## 后的文本，full_text 含标题行本身
+    """
+    parts = re.split(r'(?m)^(## .+)$', body)
+    # parts[0] = H1 区（含 H1 与首个 H2 前内容），之后交替 [title, content, title, content, ...]
+    h1_block = parts[0] if parts else ''
+    sections = []
+    i = 1
+    while i < len(parts):
+        title_line = parts[i]           # 含 '## ' 前缀
+        content = parts[i + 1] if i + 1 < len(parts) else ''
+        title = title_line[3:].strip()
+        sections.append((title, title_line + content))
+        i += 2
+    return h1_block, sections
+
+
+def merge_sections(existing_text, managed_new_text, managed_h2_titles):
+    """区段级合并：existing 中受管 H2 节替换为 managed_new 中的版本，自由节保留。
+
+    Args:
+        existing_text: 磁盘上现有文档全文（含 frontmatter）
+        managed_new_text: 渲染器新产出的受管内容全文（含 frontmatter）
+        managed_h2_titles: 受管 H2 标题集合（如 {'项目背景','项目目标'}）
+
+    Returns:
+        str: 合并后的完整文档
+    """
+    if not existing_text:
+        return managed_new_text
+
+    new_fm, new_body = _split_frontmatter(managed_new_text)
+    old_fm, old_body = _split_frontmatter(existing_text)
+
+    # frontmatter 与 H1 区以新版为准（受管）
+    new_h1, new_sections = _split_h2_sections(new_body)
+    old_h1, old_sections = _split_h2_sections(old_body)
+
+    # 从旧文档收集自由节（标题不在受管集合内的 H2 节），保留其相对顺序
+    free_sections = [(t, full) for t, full in old_sections if t not in managed_h2_titles]
+    free_titles = {t for t, _ in free_sections}
+
+    # 模板里与旧文档已有自由节同名的节 → 跳过模板版本，保留旧版（避免重复）。
+    # 典型场景：新模板加「随手记」，旧文档用户已自建「随手记」并写有内容。
+    out = [new_fm, new_h1]
+    for title, full in new_sections:
+        if title in free_titles:
+            continue
+        out.append(full if full.endswith('\n') else full + '\n')
+    for title, full in free_sections:
+        # 自由节前确保有空行分隔
+        if not out[-1].endswith('\n\n'):
+            out.append('\n')
+        out.append(full if full.endswith('\n') else full + '\n')
+
+    merged = ''.join(out)
+    # 规范：合并后全文以单个换行结尾
+    if not merged.endswith('\n'):
+        merged += '\n'
+    return merged
+
 
 
 def render_project(project, session_ids):
@@ -71,7 +152,10 @@ def render_project(project, session_ids):
     lines.append('## 项目目标')
     lines.append(project.get('goal', '') or '（暂无）')
     lines.append('')
-    
+    lines.append('## 随手记')
+    lines.append('（备注：本节内容不会被系统更新覆盖）')
+    lines.append('')
+
     return '\n'.join(lines)
 
 
@@ -190,30 +274,68 @@ def render_task(task, session_ids, log_entries):
     else:
         lines.append('- （暂无）')
     lines.append('')
-    
+    lines.append('## 随手记')
+    lines.append('（备注：本节内容不会被系统更新覆盖）')
+    lines.append('')
+
     return '\n'.join(lines)
 
 
-def write_rendered(path, content):
+def render_draft(draft):
+    """渲染收集箱（draft）文档投影。
+
+    Args:
+        draft: dict，drafts 表行（含 title, body, ts, status 等）
+
+    Returns:
+        str: 完整 Markdown 文档
+    """
+    from datetime import datetime
+    lines = []
+    lines.append('---')
+    lines.append(f'title: {draft.get("title", "")}')
+    if draft.get('ts'):
+        lines.append(f'ts: {datetime.fromtimestamp(draft["ts"]).strftime("%Y-%m-%dT%H:%M")}')
+    lines.append(f'status: {draft.get("status", "open")}')
+    lines.append('---')
+    lines.append('')
+    lines.append(draft.get('body', '') or '')
+    return '\n'.join(lines)
+
+
+def write_rendered(path, content, managed_h2_titles=None):
     """将渲染内容写入文件（osascript cp 绕 TCC）。
-    
+
+    若磁盘已有该文件且传了 managed_h2_titles，则做区段合并：
+    受管节替换为新内容，自由节原样保留。
+
     Args:
         path: vault 相对路径，如 '2. Project/2.1 Project/test专项/项目说明-test专项.md'
-        content: Markdown 字符串
-    
+        content: 渲染器新产出的受管 Markdown 字符串
+        managed_h2_titles: 受管 H2 标题集合（None 表示整文件覆盖，向后兼容）
+
     Returns:
         bool: 写入成功返回 True，失败返回 False
-    
+
     Raises:
         RuntimeError: osascript 执行失败时抛出
     """
     full_path = os.path.join(VAULT, path)
-    
+
     # 确保目录存在
     dir_path = os.path.dirname(full_path)
     if not os.path.exists(dir_path):
         os.makedirs(dir_path, exist_ok=True)
-    
+
+    # 区段合并：读现有文件，受管节替换、自由节保留
+    if managed_h2_titles and os.path.exists(full_path):
+        try:
+            with open(full_path, 'r', encoding='utf-8') as f:
+                existing = f.read()
+            content = merge_sections(existing, content, managed_h2_titles)
+        except Exception:
+            pass  # 读取失败则按整文件覆盖处理
+
     # 内容比对：无变化则跳过写入（减少文件系统事件）
     if os.path.exists(full_path):
         try:
@@ -349,6 +471,7 @@ def render_entity(conn, entity_type, entity_id):
             proj_row = conn.execute('SELECT name FROM projects WHERE id=?', (task['project_id'],)).fetchone()
             proj_name = proj_row['name'] if proj_row else task['project_id']
             path = f'{PROOT}/{proj_name}/tasks/任务-{task["title"]}.md'
+            managed = {'目标', '任务详情', '验收标准', '推进记录'}
         elif entity_type == 'project':
             project, sids = build_project_render_args(conn, entity_id)
             content = render_project(project, sids)
@@ -357,10 +480,18 @@ def render_entity(conn, entity_type, entity_id):
             cands = [f for f in os.listdir(proj_dir) if f.startswith('项目说明-') and f.endswith('.md')] if os.path.exists(proj_dir) else []
             filename = cands[0] if cands else f'项目说明-{project["name"]}.md'
             path = f'{PROOT}/{project["name"]}/{filename}'
+            managed = {'项目背景', '项目目标'}
+        elif entity_type == 'draft':
+            row = conn.execute('SELECT * FROM drafts WHERE id=?', (entity_id,)).fetchone()
+            if not row:
+                return {'ok': False, 'error': f'draft not found: {entity_id}'}
+            content = render_draft(dict(row))
+            path = f'2. Project/Inbox/{row["title"]}.md'
+            managed = None  # 整文件覆盖（draft 无自由区段）
         else:
             return {'ok': False, 'error': f'unknown entity_type: {entity_type}'}
-        
-        write_rendered(path, content)
+
+        write_rendered(path, content, managed_h2_titles=managed)
         return {'ok': True, 'path': path}
     except Exception as e:
         return {'ok': False, 'error': f'{type(e).__name__}: {e}'}

@@ -206,7 +206,16 @@ def main():
             return
         
         elif op == 'inbox_list':
-            # 列出 Inbox 收集
+            # 列出 Inbox 收集：DB 优先 + md 降级双轨（与 load_tasks_safe 同模式）
+            try:
+                from db_core import list_drafts
+                result = list_drafts()
+                if result.get('ok') and result.get('items') is not None:
+                    _json_out(result)
+                    return
+            except Exception as e:
+                print(f'[inbox_list] DB 路径失败，降级 md 扫描: {e}', file=sys.stderr)
+            # ── 降级：文件扫描（旧逻辑保留）──
             inbox_dir = os.path.join(VAULT, PROOT, 'Inbox')
             items = []
             if os.path.exists(inbox_dir):
@@ -238,6 +247,49 @@ def main():
                 # 按 ts 倒序
                 items.sort(key=lambda x: x.get('ts', ''), reverse=True)
             _json_out({'ok': True, 'items': items})
+            return
+
+        elif op == 'inbox_create':
+            # 创建收集箱条目（DB 先行，文件渲染投影到 2. Project/Inbox/）
+            try:
+                from db_core import create_draft
+                result = create_draft(spec.get('title', ''), body=spec.get('body', ''),
+                                      changed_by=spec.get('source', 'plugin'))
+                _json_out(result)
+            except Exception as e:
+                _json_err(f'inbox_create: {type(e).__name__}: {e}')
+            return
+
+        elif op == 'inbox_delete':
+            # 删除收集箱条目（DB 记录 + 物理文件）
+            try:
+                from db_core import delete_draft
+                target = spec.get('draft_id') or spec.get('title') or ''
+                # 兼容旧调用：传 path 时提取文件名
+                if not target and spec.get('path'):
+                    target = os.path.basename(spec['path'])
+                    if target.endswith('.md'):
+                        target = target[:-3]
+                result = delete_draft(target, changed_by=spec.get('source', 'plugin'))
+                _json_out(result)
+            except Exception as e:
+                _json_err(f'inbox_delete: {type(e).__name__}: {e}')
+            return
+
+        elif op == 'draft_convert':
+            # draft 立项为正式任务（create_task + 文件迁移 + archived 留痕）
+            try:
+                from db_core import convert_draft
+                target = spec.get('draft_id') or spec.get('title') or ''
+                if not target and spec.get('path'):
+                    target = os.path.basename(spec['path'])
+                    if target.endswith('.md'):
+                        target = target[:-3]
+                result = convert_draft(target, spec.get('project_id', ''),
+                                       changed_by=spec.get('source', 'plugin'))
+                _json_out(result)
+            except Exception as e:
+                _json_err(f'draft_convert: {type(e).__name__}: {e}')
             return
         
         elif op == 'ops_log':
@@ -348,10 +400,18 @@ def main():
             return
 
         elif op == 'delete_file':
-            # 兼容层：删除任务文件 → delete_task
+            # 兼容层：识别 Inbox 路径 → delete_draft；任务文件 → delete_task
             try:
-                from db_core import delete_task
-                result = delete_task(spec.get('path', ''))
+                path = spec.get('path', '')
+                if path.startswith('2. Project/Inbox/'):
+                    from db_core import delete_draft
+                    target = os.path.basename(path)
+                    if target.endswith('.md'):
+                        target = target[:-3]
+                    result = delete_draft(target, changed_by=spec.get('source', 'plugin'))
+                else:
+                    from db_core import delete_task
+                    result = delete_task(path)
                 _json_out(result)
             except Exception as e:
                 _json_err(f'delete_file compat: {type(e).__name__}: {e}')
