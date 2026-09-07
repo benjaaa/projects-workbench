@@ -1117,6 +1117,13 @@ def create_task(project_id, title, goal='', task_detail='', acceptance='', prior
                 now, now
             ))
             _log_change('task', task_id, 'created', None, task_id, changed_by)
+
+            # documents 登记：任务创建时一次性写入文档映射（与项目创建时的登记一致）
+            # 路径 = 项目目录（=项目 name，强制一致原则）/tasks/任务-<title>.md
+            proj_name_row = conn.execute('SELECT name FROM projects WHERE id=?', (project_id,)).fetchone()
+            proj_name = proj_name_row['name'] if proj_name_row else project_id
+            conn.execute('''INSERT OR REPLACE INTO documents(entity_type, entity_id, doc_type, path, updated_at)
+                VALUES(?,?,?,?,?)''', ('task', task_id, 'main', f'{PROOT}/{proj_name}/tasks/任务-{title}.md', now))
             conn.commit()
             
             # 触发渲染
@@ -1232,6 +1239,13 @@ def rename_task(path, new_title, changed_by=''):
             # 更新 DB（只更新 title，id 保持 UUID 不变）
             conn.execute('UPDATE tasks SET title=? WHERE id=?', (new_title, entity_id))
             _log_change('task', entity_id, 'title', old_title, new_title, changed_by)
+
+            # documents 映射同步更新（title 变 → 文件名变 → path 变）
+            proj_row2 = conn.execute('SELECT name FROM projects WHERE id=?', (row['project_id'],)).fetchone()
+            proj_name2 = proj_row2['name'] if proj_row2 else row['project_id']
+            new_doc_path = f'{PROOT}/{proj_name2}/tasks/任务-{new_title}.md'
+            conn.execute('UPDATE documents SET path=?, updated_at=? WHERE entity_type=? AND entity_id=?',
+                         (new_doc_path, int(time.time()), 'task', entity_id))
             v = _bump_version(conn, 'task', entity_id, changed_by)
             conn.commit()
             
@@ -1246,7 +1260,7 @@ def rename_task(path, new_title, changed_by=''):
                 except Exception:
                     pass
             
-            new_path = f'{PROOT}/{project_id}/tasks/任务-{new_title}.md'
+            new_path = f'{PROOT}/{proj_name2}/tasks/任务-{new_title}.md'
             _log_op(changed_by or 'plugin', 'rename_task', 'task', entity_id, f'重命名：{old_title} → {new_title}')
             return {'ok': True, 'version': v, 'new_path': new_path, 'db_first': True}
         finally:
@@ -1374,6 +1388,12 @@ def repeat_next(path, changed_by=''):
                     return {'ok': False, 'error': 'EXISTS'}
                 raise
             _log_change('task', new_task_id, 'created', None, new_title, changed_by)
+
+            # documents 登记：repeat_next 生成的周期任务同样登记（与 create_task 一致）
+            rpt_proj_row = conn.execute('SELECT name FROM projects WHERE id=?', (project_id,)).fetchone()
+            rpt_proj_name = rpt_proj_row['name'] if rpt_proj_row else project_id
+            conn.execute('''INSERT OR REPLACE INTO documents(entity_type, entity_id, doc_type, path, updated_at)
+                VALUES(?,?,?,?,?)''', ('task', new_task_id, 'main', f'{PROOT}/{rpt_proj_name}/tasks/任务-{new_title}.md', now))
             conn.commit()
 
             # 触发渲染
