@@ -610,6 +610,10 @@ def set_property(path, field, value, if_version=None, changed_by=''):
             _validate_status(entity_type, value)
         if field == 'priority':
             _validate_priority(value)
+        # 安全校验：title（任务）/name（项目）会进入文件路径与 shell 命令（osascript 渲染/删除），
+        # set_property 是通用入口（含 TaskDetailPage 行内编辑），不能指望调用方走专用入口
+        if field in ('title', 'name'):
+            _validate_safe_name(value, field)
         
         conn = _wb_conn()
         try:
@@ -638,11 +642,11 @@ def set_property(path, field, value, if_version=None, changed_by=''):
             conn.execute(f'UPDATE {table} SET {field}=? WHERE id=?', (value, entity_id))
             _log_change(entity_type, entity_id, field, old, value, changed_by)
             
-            # Done/Dropped 联动 complete
+            # Done/Dropped 联动 complete（存 INTEGER 时间戳，与主字段类型转换一致）
             if field == 'status' and value in ('Done', 'Dropped') and not row['complete']:
-                today = time.strftime('%Y-%m-%d')
-                conn.execute(f'UPDATE {table} SET complete=? WHERE id=?', (today, entity_id))
-                _log_change(entity_type, entity_id, 'complete', row['complete'], today, changed_by)
+                today_ts = _date_to_ts(time.strftime('%Y-%m-%d'))
+                conn.execute(f'UPDATE {table} SET complete=? WHERE id=?', (today_ts, entity_id))
+                _log_change(entity_type, entity_id, 'complete', row['complete'], today_ts, changed_by)
             
             v = _bump_version(conn, entity_type, entity_id, changed_by)
             conn.commit()
@@ -1707,6 +1711,9 @@ def delete_project(path, changed_by=''):
             # 项目自身关联
             conn.execute('DELETE FROM project_sessions WHERE project_id=?', (project_id,))
             conn.execute('DELETE FROM documents WHERE entity_type=? AND entity_id=?', ('project', project_id))
+            # 清理创建时登记的 folder 骨架行（5 个标准目录），避免孤儿记录积累
+            proj_rel_del = f'{PROOT}/{dir_name}'
+            conn.execute("DELETE FROM documents WHERE entity_type='folder' AND entity_id LIKE ?", (f'{proj_rel_del}/%',))
             conn.execute('DELETE FROM projects WHERE id=?', (project_id,))
 
             _log_change('project', project_id, 'deleted', project_name, None, changed_by)
