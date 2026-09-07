@@ -848,25 +848,31 @@ function useReducer(initialView) {
         createKanbanTask(updated)
       }
     }
-    // 重复任务：完成/放弃时自动创建下一个周期任务
-    if (field === 'status' && (value === 'Done' || value === 'Dropped') && t_.repeat_mode) {
-      runSpec({ op: 'repeat_next', path: t_.path }).then(function(rr) {
-        if (rr && rr.ok) {
-          tost('已生成下一周期任务：' + (rr.title || rr.due || ''))
-          load()
-        } else if (rr && rr.error === 'EXISTS') {
-          // 已存在同日期任务，跳过
-        } else {
-          console.error('[pw] repeat_next:', rr)
-        }
-      }).catch(function(e) { console.error('[pw] repeat_next failed:', e) })
-    }
     return Promise.all(specs.map(function(s) { return runSpec(s) }))
       .then(function() {
         tost('已更新')
         // 编辑后触发开始时间自动流转（改 start/status 后重新判断）
         autoStartFlow()
         if (field === 'status' && value !== t_[field]) logOp(t_.project || '', t_.title, 'status_change', '「' + (t_.project || '') + '」任务「' + t_.title + '」状态变更：' + (PST[t_[field]] || t_[field]) + ' → ' + (PST[value] || value))
+        // 重复任务：状态写入成功（确认已 Done/Dropped）后才生成下一周期
+        // 原先与状态写入并发，状态写入失败时仍会生成下一期 → 状态不一致
+        if (field === 'status' && (value === 'Done' || value === 'Dropped') && t_.repeat_mode) {
+          runSpec({ op: 'repeat_next', path: t_.path }).then(function(rr) {
+            if (rr && rr.ok) {
+              tost('已生成下一周期任务：' + (rr.title || rr.due || ''))
+              load()
+            } else if (rr && rr.error === 'EXISTS') {
+              // 已存在同日期任务，跳过
+            } else {
+              // 静默断链防御：月维度小月等场景会返回 error，必须提示用户循环已断
+              console.error('[pw] repeat_next:', rr)
+              tost('下一周期生成失败：' + ((rr && rr.error) || '未知原因').slice(0, 50))
+            }
+          }).catch(function(e) {
+            console.error('[pw] repeat_next failed:', e)
+            tost('下一周期生成失败：' + ((e && e.message) || '').slice(0, 40))
+          })
+        }
       })
       .catch(function(e) {
         console.error('[pw] doSetField failed:', field, value, e)
@@ -3481,7 +3487,7 @@ function RepeatFields(props) {
     enabled && jsxs('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginTop: '8px' }, children: [
       jsxs('div', { className: 'flex items-center gap-1.5', children: [
         jsx('span', { className: 'text-[0.6875rem]', style: { color: MUT }, children: '每' }),
-        jsx('input', { id: 'ntRepeatEvery', value: every, onChange: function(e) { setEvery(e.target.value) }, style: { width: '44px', height: '26px', border: '1px solid ' + LINE2, borderRadius: '6px', textAlign: 'center', fontSize: '0.75rem', outline: 'none' } }),
+        jsx('input', { id: 'ntRepeatEvery', type: 'number', min: 1, step: 1, value: every, onChange: function(e) { var v = e.target.value; if (v === '' || parseInt(v, 10) >= 1) setEvery(v) }, style: { width: '44px', height: '26px', border: '1px solid ' + LINE2, borderRadius: '6px', textAlign: 'center', fontSize: '0.75rem', outline: 'none' } }),
         jsx('select', { id: 'ntRepeatUnit', value: unit, onChange: function(e) { setUnit(e.target.value) }, style: { height: '26px', border: '1px solid ' + LINE2, borderRadius: '6px', fontSize: '0.75rem', outline: 'none', background: '#fff' }, children: [['day','天'],['week','周'],['month','月']].map(function(o) { return jsx('option', { value: o[0], children: o[1] }, o[0]) }) }),
       ]}),
       unit === 'week' && jsxs('div', { className: 'flex items-center gap-1.5', children: [

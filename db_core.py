@@ -1275,19 +1275,31 @@ def repeat_next(path, changed_by=''):
             row = _get_entity(conn, 'task', entity_id)
             if not row:
                 return {'ok': False, 'error': f'task not found: {entity_id}'}
-            
+
+            # project_id 归一化：路径里的是目录名（=name），外键要求 UUID，用任务行的真实 project_id
+            project_id = row['project_id']
+
             # 校验重复配置
             if row['repeat_mode'] != 'fixed' or not row['repeat_unit'] or not row['repeat_anchor']:
                 return {'ok': False, 'error': 'NO_REPEAT'}
             
             # 计算下一个周期
             from datetime import datetime, timedelta
+            import calendar
             anchor = datetime.fromtimestamp(row['repeat_anchor']) if isinstance(row['repeat_anchor'], int) else datetime.strptime(row['repeat_anchor'], '%Y-%m-%d')
             today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
             every = row['repeat_every'] or 1
             unit = row['repeat_unit']
             day = row['repeat_day'] or 1
-            
+
+            # 防御：every 必须为正整数，否则 while 倒退死循环（负数）或永不前进（0）
+            try:
+                every = int(every)
+            except (TypeError, ValueError):
+                return {'ok': False, 'error': f'invalid repeat_every: {every}'}
+            if every < 1:
+                return {'ok': False, 'error': f'invalid repeat_every: {every}（必须为正整数）'}
+
             def advance(d):
                 x = d
                 if unit == 'day':
@@ -1295,7 +1307,8 @@ def repeat_next(path, changed_by=''):
                     while x <= today or x <= d:
                         x += timedelta(days=every)
                 elif unit == 'week':
-                    wd = day if 1 <= day <= 7 else 1
+                    # UI 编号 周一=1…周日=7，Python weekday() 周一=0…周日=6，需 -1 对齐
+                    wd = (day - 1) if 1 <= day <= 7 else 0
                     days_ahead = wd - x.weekday()
                     if days_ahead <= 0:
                         days_ahead += 7
@@ -1304,10 +1317,21 @@ def repeat_next(path, changed_by=''):
                         x += timedelta(weeks=every)
                 elif unit == 'month':
                     dd = day if 1 <= day <= 31 else 1
-                    x = x.replace(day=dd)
-                    while x <= today or x <= d or x.day != dd:
-                        x = x + timedelta(days=32)
-                        x = x.replace(day=dd)
+                    # 小月兜底：dd 超当月天数时落当月最后一天（replace(day=dd) 会 ValueError）
+                    def _clamp(dt, daynum):
+                        last = calendar.monthrange(dt.year, dt.month)[1]
+                        return dt.replace(day=min(daynum, last))
+                    x = _clamp(x, dd)
+                    # every 作为月步长生效：每 N 月
+                    def _add_months(dt, n):
+                        m = dt.month - 1 + n
+                        y = dt.year + m // 12
+                        m = m % 12 + 1
+                        last = calendar.monthrange(y, m)[1]
+                        return datetime(y, m, min(dt.day, last))
+                    while x <= today or x <= d:
+                        x = _add_months(x, every)
+                        x = _clamp(x, dd)
                 return x
             
             next_due = advance(anchor)
@@ -1327,20 +1351,28 @@ def repeat_next(path, changed_by=''):
             new_task_id = uuid.uuid4().hex[:12]
 
             # 创建新任务（复制原任务字段，重置状态）
+            # 判重竞态：并发触发时 SELECT 后 INSERT 之间无事务，UNIQUE 兜底会抛 IntegrityError，
+            # 捕获后转为 'EXISTS' 语义（前端 plugin.js 专门处理该错误码）
             now = int(time.time())
-            conn.execute('''INSERT INTO tasks(
-                id, project_id, title, status, priority, handler,
-                start, due, complete, version,
-                goal, body, acceptance,
-                repeat_mode, repeat_unit, repeat_every, repeat_day, repeat_anchor,
-                created_at, updated_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''', (
-                new_task_id, project_id, new_title, 'open', row['priority'], row['handler'],
-                None, _date_to_ts(next_due_str), None, 1,
-                row['goal'], row['body'], row['acceptance'],
-                row['repeat_mode'], row['repeat_unit'], row['repeat_every'], row['repeat_day'], next_due_str,
-                now, now
-            ))
+            try:
+                conn.execute('''INSERT INTO tasks(
+                    id, project_id, title, status, priority, handler,
+                    start, due, complete, version,
+                    goal, body, acceptance,
+                    repeat_mode, repeat_unit, repeat_every, repeat_day, repeat_anchor,
+                    created_at, updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''', (
+                    new_task_id, project_id, new_title, 'open', row['priority'], row['handler'],
+                    None, _date_to_ts(next_due_str), None, 1,
+                    row['goal'], row['body'], row['acceptance'],
+                    row['repeat_mode'], row['repeat_unit'], row['repeat_every'], row['repeat_day'], next_due_str,
+                    now, now
+                ))
+            except sqlite3.IntegrityError as ie:
+                conn.rollback()
+                if 'UNIQUE' in str(ie):
+                    return {'ok': False, 'error': 'EXISTS'}
+                raise
             _log_change('task', new_task_id, 'created', None, new_title, changed_by)
             conn.commit()
 
