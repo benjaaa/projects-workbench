@@ -652,7 +652,9 @@ function useReducer(initialView) {
             runSpec({ op: 'kanban_worker_session', task_id: t.kanban_task_id, board: 'default' }).then(function(wr) {
               if (wr && wr.worker_session_id) {
                 // P3 DB 真相源：worker session 关联写 DB（frontmatter 通道退役）
-                runSpec({ op: 'link_session', task_path: t.path, sid: wr.worker_session_id, source: 'kanban' }).catch(function(e) { console.error('[pw] link_session failed:', e) })
+                runSpec({ op: 'link_session', task_path: t.path, sid: wr.worker_session_id, source: 'kanban' }).then(function(r) {
+                  if (r && r.ok === false) tost('worker 会话关联失败：' + (r.error || '').slice(0, 50))
+                }).catch(function(e) { console.error('[pw] link_session failed:', e); tost('worker 会话关联失败') })
                 // 将 worker session 关联到项目目录（更新 cwd → 支持 resume + AGENTS.md + 项目会话列表）
                 runSpec({ op: 'kanban_link_session', task_id: t.kanban_task_id, worker_session_id: wr.worker_session_id, board: 'default' }).catch(function(e) { console.error('[pw] kanban_link_session failed:', e) })
                 // 自动写推进记录：kanban worker 完成（YAML schema，跨 agent 可读）
@@ -1622,12 +1624,19 @@ function ChatHome(R) {
         var promptText = refText ? (refText + '\n\n' + rawText) : rawText
         // P3 DB 真相源：session↔实体映射直接写 workbench.db（frontmatter session_ids 写入通道退役）
         // skip_validation: 刚创建的 session 可能还没落库 state.db，跳过校验避免 INVALID_SESSION_IDS
+        // 关联失败必须提示用户（否则产生孤儿 Session 且无感知）
         if (issue) {
           runSpec({ op: 'link_session', task_path: issue.path, sid: storedId, source: 'desktop', skip_validation: true })
-            .catch(function(e) { console.error('[pw] link_session failed:', e) })
+            .then(function(r) {
+              if (r && r.ok === false) tost('会话已创建但任务关联失败：' + (r.error || '').slice(0, 50))
+            })
+            .catch(function(e) { console.error('[pw] link_session failed:', e); tost('会话关联失败：' + ((e && e.message) || '').slice(0, 40)) })
         } else if (proj && proj.path) {
           runSpec({ op: 'link_session', project_path: proj.path, sid: storedId, source: 'desktop', skip_validation: true })
-            .catch(function(e) { console.error('[pw] link_session(proj) failed:', e) })
+            .then(function(r) {
+              if (r && r.ok === false) tost('会话已创建但项目关联失败：' + (r.error || '').slice(0, 50))
+            })
+            .catch(function(e) { console.error('[pw] link_session(proj) failed:', e); tost('会话关联失败：' + ((e && e.message) || '').slice(0, 40)) })
         }
         // 注意：不在 create 成功后清空编辑器——loading 期间内容保持冻结（用户要求）
         // 清空延迟到 finish()（loading 结束、跳转完成后）再执行，见 stop()
