@@ -55,8 +55,8 @@ def _chunked_out(data, pid=None):
     tmp = f'/tmp/hpw_data_{pid}.b64'
     with open(tmp, 'w') as f:
         f.write(b64)
-    # 输出分片元信息（plugin.js ld() 期望的格式）
-    print(json.dumps({'len': len(b64), 'pid': pid}))
+    # 输出分片元信息（plugin.js runSpec 期望 __chunked 标记 + ok）
+    print(json.dumps({'__chunked': True, 'ok': True, 'len': len(b64), 'pid': pid}))
 
 
 def _read_chunk(off, lim, pid):
