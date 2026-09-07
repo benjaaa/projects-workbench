@@ -16,6 +16,7 @@
 import os
 import re
 import sqlite3
+import subprocess
 import time
 import json
 
@@ -73,9 +74,10 @@ def _date_to_ts(date_str):
 # ─── 连接管理 ─────────────────────────────────────────────────
 
 def _wb_conn():
-    """获取业务 DB 连接（读写模式）。"""
+    """获取业务 DB 连接（读写模式，启用外键约束）。"""
     conn = sqlite3.connect(WB_DB)
     conn.row_factory = sqlite3.Row
+    conn.execute('PRAGMA foreign_keys = ON')
     return conn
 
 
@@ -139,6 +141,8 @@ def create_draft(title, body='', changed_by=''):
     """
     try:
         title = (title or '').strip() or '未命名'
+        # 安全校验：标题将进入文件路径（Inbox/<title>.md）与 shell 命令
+        _validate_safe_name(title, 'title')
         conn = _wb_conn()
         try:
             _ensure_draft_table(conn)
@@ -193,7 +197,7 @@ def list_drafts(include_archived=True):
                 items.append({
                     'name': r['title'], 'path': f'{INBOX_DIR}/{r["title"]}.md',
                     'title': r['title'], 'ts': ts_str, 'first': first,
-                    'content': content, 'draft_id': r['id'], 'status': r['status']
+                    'body': body, 'content': content, 'draft_id': r['id'], 'status': r['status']
                 })
             return {'ok': True, 'items': items}
         finally:
@@ -531,6 +535,32 @@ def _validate_priority(value):
     """校验优先级枚举值。"""
     if value and value not in VALID_PRIORITIES:
         raise ValidationError(f'invalid priority: {value}')
+
+
+# 标题/目录名安全校验：禁止 shell 特殊字符与路径分隔符（防 osascript 注入 + 路径穿越）
+# 覆盖场景：标题可能由 Agent 生成（原则5：AI 一等写入者），LLM 输出存在被诱导出特殊字符的现实概率
+UNSAFE_NAME_CHARS = set('/\\"\'`;$(){}[]|&<>!\n\r')
+UNSAFE_NAME_PATTERN = re.compile(r'\.\.')
+
+
+def _validate_safe_name(name, field_name='name'):
+    """校验名称/标题对 shell 与文件系统安全。
+
+    - 禁止路径分隔符与 shell 元字符（osascript do shell script 拼接注入面）
+    - 禁止 '..'（路径穿越）
+    - 禁止空串与超长
+    """
+    if not name or not str(name).strip():
+        raise ValidationError(f"'{field_name}' cannot be empty")
+    name = str(name)
+    if len(name) > 200:
+        raise ValidationError(f"'{field_name}' exceeds 200 characters")
+    bad = sorted({c for c in name if c in UNSAFE_NAME_CHARS})
+    if bad:
+        raise ValidationError(f"'{field_name}' contains unsafe characters: {' '.join(bad)}")
+    if UNSAFE_NAME_PATTERN.search(name):
+        raise ValidationError(f"'{field_name}' contains path traversal '..'")
+    return name.strip()
 
 
 def _get_entity(conn, entity_type, entity_id):
@@ -1045,6 +1075,8 @@ def create_task(project_id, title, goal='', task_detail='', acceptance='', prior
         dict: {'ok': True, 'task_id': str} 或 {'ok': False, 'error': str}
     """
     try:
+        # 安全校验：标题将进入文件路径与 shell 命令（osascript），必须防注入
+        _validate_safe_name(title, 'title')
         # 校验项目存在（支持 id 或 name 双路查找，与 _get_entity 一致）
         conn = _wb_conn()
         try:
@@ -1183,6 +1215,8 @@ def rename_task(path, new_title, changed_by=''):
         entity_type, entity_id, project_id = _validate_path(path)
         if entity_type != 'task':
             return {'ok': False, 'error': 'rename_task requires task path'}
+        # 安全校验：新标题将进入文件名与 shell 命令
+        _validate_safe_name(new_title, 'new_title')
         
         conn = _wb_conn()
         try:
@@ -1441,6 +1475,25 @@ def create_project(dir_path, project_content, agents_content, changed_by=''):
     # 从路径提取项目名
     folder_name = dir_path.rstrip('/').split('/')[-1]
 
+    # 安全校验：项目名将作为目录名并进入 shell 命令（osascript），必须防注入/路径穿越
+    try:
+        folder_name = _validate_safe_name(folder_name, 'project name')
+    except ValidationError as e:
+        return {'ok': False, 'error': str(e)}
+
+    # 从 project_content 解析字段（frontmatter），提前取 title 做一致性校验
+    fields = _parse_frontmatter(project_content)
+    title = fields.get('title', '').strip()
+
+    # 强制一致：目录名 == 项目显示名（单一信源，消除目录/名称分叉类问题）
+    # 分叉会让 renderer（按 name 定位目录）与 delete_project（按 name 删目录）都失效
+    if title and title != folder_name:
+        return {'ok': False, 'error': f'目录名与项目名不一致: 目录「{folder_name}」≠ 项目「{title}」。请保持两者一致。'}
+    if not title:
+        # 无 title 时以目录名为准
+        project_content = project_content.replace('---\n', f'---\ntitle: {folder_name}\n', 1) if 'title:' not in project_content else project_content
+        fields['title'] = folder_name
+
     # 校验项目名称唯一性（按 name 查，id 是 UUID）
     conn = _wb_conn()
     try:
@@ -1448,22 +1501,28 @@ def create_project(dir_path, project_content, agents_content, changed_by=''):
         if existing:
             return {'ok': False, 'error': f'项目已存在: {folder_name}'}
 
-        # 从 project_content 解析字段（frontmatter）
-        fields = _parse_frontmatter(project_content)
-
         # 生成 UUID 主键
         import uuid
         project_id = uuid.uuid4().hex[:12]
 
-        # 插入 DB（id=UUID，name=显示名）
+        # 插入 DB（id=UUID，name=目录名=显示名，强制一致后两者同一）
         now = int(time.time())
         conn.execute(
             'INSERT INTO projects(id, name, status, background, goal, created_at, updated_at, version) VALUES(?,?,?,?,?,?,?,?)',
-            (project_id, fields.get('title', folder_name), fields.get('status', 'open'),
+            (project_id, folder_name, fields.get('status', 'open'),
              fields.get('background', ''), fields.get('goal', ''),
              now, now, 1)
         )
         _log_change('project', project_id, 'created', None, folder_name, changed_by)
+
+        # documents 登记：项目创建时一次性写入骨架映射（此后不更新，仅创建时刻登记）
+        # 主文档 + 5 个标准目录
+        proj_rel = f'{PROOT}/{folder_name}'
+        conn.execute('''INSERT OR REPLACE INTO documents(entity_type, entity_id, doc_type, path, updated_at)
+            VALUES(?,?,?,?,?)''', ('project', project_id, 'main', f'{proj_rel}/项目说明-{folder_name}.md', now))
+        for sub in ['raw', 'output', 'tmp', 'scripts', 'tasks']:
+            conn.execute('''INSERT OR REPLACE INTO documents(entity_type, entity_id, doc_type, path, updated_at)
+                VALUES(?,?,?,?,?)''', ('folder', f'{proj_rel}/{sub}', 'dir', f'{proj_rel}/{sub}', now))
         conn.commit()
 
         # 创建目录结构（文件系统）
@@ -1503,15 +1562,22 @@ def _parse_frontmatter(content):
 
 
 def _create_project_dirs(dir_path):
-    """创建项目标准目录结构。"""
+    """创建项目标准目录结构（统一走 osascript，与渲染/直接写文件的 TCC 绕过策略一致）。
+
+    背景：Python 进程直接写 ~/Documents 下的 Vault 会被 macOS TCC 拦截，
+    项目说明/AGENTS.md 都走 osascript do shell script；目录创建若用 os.makedirs
+    会产生「DB 已 commit、目录未建成」的不一致态。此处统一改为 osascript。
+    目录名已经过 _validate_safe_name 校验（无引号/分号/路径穿越），拼接安全。
+    """
     full_path = os.path.join(VAULT, dir_path)
-    for sub in ['raw', 'output', 'tmp', 'scripts', 'tasks']:
-        os.makedirs(os.path.join(full_path, sub), exist_ok=True)
-    # pipeline.md
-    pipeline_path = os.path.join(full_path, 'pipeline.md')
-    if not os.path.exists(pipeline_path):
-        with open(pipeline_path, 'w', encoding='utf-8') as f:
-            f.write('')
+    subs = ' '.join('\\"' + full_path + '/' + sub + '\\"' for sub in ['raw', 'output', 'tmp', 'scripts', 'tasks'])
+    cmd = 'mkdir -p \\"' + full_path + '\\" ' + subs + ' && touch \\"' + full_path + '/pipeline.md\\"'
+    p = subprocess.run(
+        ['osascript', '-e', 'do shell script "' + cmd + '"'],
+        capture_output=True, timeout=30
+    )
+    if p.returncode != 0:
+        raise RuntimeError(f'osascript mkdir failed: {p.stderr.decode()[:200]}')
 
 
 def delete_project(path, changed_by=''):
@@ -1559,6 +1625,20 @@ def delete_project(path, changed_by=''):
             finally:
                 conn.close()
 
+        # 先取目录名（删 DB 前）：documents 表的项目主文档路径含真实目录名
+        conn = _wb_conn()
+        try:
+            doc_row = conn.execute(
+                "SELECT path FROM documents WHERE entity_type='project' AND entity_id=? AND doc_type='main' LIMIT 1",
+                (project_id,)).fetchone()
+        finally:
+            conn.close()
+        dir_name = project_name
+        if doc_row and doc_row['path']:
+            parts = doc_row['path'].split('/')
+            if len(parts) >= 2:
+                dir_name = parts[-2]
+
         # 删除 DB 记录
         conn = _wb_conn()
         try:
@@ -1582,13 +1662,21 @@ def delete_project(path, changed_by=''):
         finally:
             conn.close()
 
-        # 删除目录（含全部文件）——用名称定位
-        proj_dir = os.path.join(VAULT, PROOT, project_name)
+        # 删除目录（含全部文件）
+        # TCC 约束：osascript do shell script 的 rm -rf 对 ~/Documents 被拦截（mkdir/cp/touch 放行），
+        # 改用 AppleScript 原生 tell Finder to delete（进废纸篓，可恢复，TCC 友好）。
+        proj_dir = os.path.join(VAULT, PROOT, dir_name)
         if os.path.isdir(proj_dir):
             try:
-                shutil.rmtree(proj_dir)
-            except Exception:
-                pass  # 文件删除失败不阻塞
+                p = subprocess.run(
+                    ['osascript', '-e', 'tell application "Finder" to delete (POSIX file "' + proj_dir + '" as alias)'],
+                    capture_output=True, timeout=30
+                )
+                if p.returncode != 0:
+                    _log_op(changed_by or 'plugin', 'delete_project_dir_failed', 'project', project_id,
+                            '目录删除失败(进废纸篓): ' + p.stderr.decode()[:150])
+            except Exception as _e:
+                _log_op(changed_by or 'plugin', 'delete_project_dir_failed', 'project', project_id, str(_e)[:150])
 
         _log_op(changed_by or 'plugin', 'delete_project', 'project', project_id, f'删除项目「{project_name}」（含 {len(task_ids)} 个任务）')
         return {'ok': True, 'deleted_tasks': len(task_ids)}

@@ -2688,14 +2688,7 @@ function InboxList(R) {
 function InboxDetail(R) {
   var dwObj = R.dw || {}
   var item = dwObj.item || dwObj || {}
-  var cst = useState(''), content = cst[0], setContent = cst[1]
-  useEffect(function() {
-    if (item && item.path) {
-      runSpec({ op: 'read', path: item.path }).then(function(r) {
-        setContent((r && r.content) || '')
-      }).catch(function(e) { console.error('[pw] inbox read failed:', e) })
-    }
-  }, [item && item.path])
+  // 正文直接来自 inbox_list 的 DB 数据（item.body），不直读文档层
   function goHandle() {
     // 回到 chat 首页 + 输入框内 @ 该文件（作为 inbox chip 预载），不开新 session
     var title = item.title || 'Inbox'
@@ -2732,7 +2725,7 @@ function InboxDetail(R) {
             jsx(Btn, { onClick: goHandle, children: '去处理 →' }),
           ]}),
         ]}),
-        jsx('div', { className: 'px-4 py-3 text-[0.8125rem] whitespace-pre-wrap', style: { color: BODY, minHeight: '120px' }, children: content || item.body || item.first || '（空）' }),
+        jsx('div', { className: 'px-4 py-3 text-[0.8125rem] whitespace-pre-wrap', style: { color: BODY, minHeight: '120px' }, children: item.body || item.first || '（空）' }),
       ]}),
     ]}) }) }),
     jsx(Modal, R),

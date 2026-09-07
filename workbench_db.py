@@ -107,18 +107,8 @@ CREATE TABLE IF NOT EXISTS log_sessions (
 -- entity_type: project|task = 实体主文档（生成器管理版本）
 --              file   = 项目目录内其他文件（name+path 映射）
 --              folder = 项目目录内子文件夹（仅 path 映射，entity_id=path）
-CREATE TABLE IF NOT EXISTS change_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    entity_type TEXT NOT NULL,
-    entity_id TEXT NOT NULL,
-    field TEXT NOT NULL,
-    old_value TEXT,
-    new_value TEXT,
-    changed_at INTEGER NOT NULL,
-    changed_by TEXT DEFAULT ''
-);
-CREATE INDEX IF NOT EXISTS idx_change_entity ON change_log(entity_type, entity_id, changed_at);
-
+-- [已废弃 2026-09-05] change_log 表定义已移除：日志层独立存于 workbench-log.db
+-- （ops_log/change_log/render_queue），业务库不再承载日志。见 migrate_v2.py / db_core.py。
 CREATE TABLE IF NOT EXISTS documents (
     entity_type TEXT NOT NULL,         -- project | task | file | folder
     entity_id TEXT NOT NULL,           -- 实体id；file=文件名；folder=path
