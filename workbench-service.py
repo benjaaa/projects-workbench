@@ -535,10 +535,14 @@ def main():
             conn = sqlite3.connect(state_db)
             conn.row_factory = sqlite3.Row
             
-            # 0) DB 关联优先
+            # 0) DB 关联优先（权威来源：project_sessions 显式关联）
+            # proj_dir 是目录名（=项目 name），需先解析为 UUID 再查——直接用目录名查永远为空（死代码）
             try:
                 wb = sqlite3.connect(os.path.join(SCRIPT_DIR, 'workbench.db'))
-                db_sids = [r[0] for r in wb.execute('SELECT sid FROM project_sessions WHERE project_id=?', (proj_dir,)).fetchall()]
+                wb.row_factory = sqlite3.Row
+                prow = wb.execute('SELECT id FROM projects WHERE name=? OR id=?', (proj_dir, proj_dir)).fetchone()
+                proj_uuid = prow['id'] if prow else None
+                db_sids = [r[0] for r in wb.execute('SELECT sid FROM project_sessions WHERE project_id=?', (proj_uuid,)).fetchall()] if proj_uuid else []
                 wb.close()
             except Exception:
                 db_sids = []
