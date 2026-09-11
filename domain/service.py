@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import db_core
 import db_read
 
+from db_transaction import transaction
 from . import handlers  # noqa: F401 - registers command handlers
 from . import repositories
 from .errors import DomainError, forbidden, invalid_argument
@@ -25,6 +26,7 @@ class DomainContext:
 
 class DomainService:
     def __init__(self, db_path, command_registry=None, store=None, core=None, reader=None):
+        self.db_path = db_path
         self.registry = command_registry or registry
         self.store = store or CommandStore(db_path)
         self.context = DomainContext(
@@ -45,32 +47,9 @@ class DomainService:
             if envelope.actor.type not in spec.allowed_actors:
                 raise forbidden(f'{envelope.actor.type} cannot execute {envelope.command}')
             self._validate_input(envelope, spec)
-
-            replay = self.store.find_idempotent(envelope.idempotency_key)
-            if replay:
-                if replay.get('command') != envelope.command:
-                    raise invalid_argument('idempotency key was used for a different command')
-                response = replay['result']
-                response['replayed'] = True
-                return response
-
-            output = spec.handler(envelope, self.context) or {}
-            if not isinstance(output, dict):
-                output = {'value': output}
-            projection = output.pop('projection', {'status': 'pending' if spec.write else 'not_required'})
-            if spec.write and output.get('write', {}).get('rendered'):
-                projection = {'status': 'synced', 'path': output['write']['rendered']}
-            audit_id = new_id('audit')
-            response = CommandResponse(
-                ok=True,
-                command=envelope.command,
-                command_id=envelope.command_id,
-                audit_id=audit_id,
-                result=output,
-                projection=projection,
-            ).to_dict()
-            self.store.save(envelope, audit_id, response)
-            return response
+            if spec.write:
+                return self._execute_write(envelope, spec)
+            return self._execute_read(envelope, spec)
         except DomainError as error:
             envelope = self._safe_envelope(payload)
             return CommandResponse(
@@ -95,6 +74,54 @@ class DomainService:
                 command_id=(envelope.command_id if envelope else new_id('cmd')),
                 error={'code': 'INTERNAL_ERROR', 'message': f'{type(error).__name__}: {error}'},
             ).to_dict()
+
+    def _execute_read(self, envelope, spec):
+        output = spec.handler(envelope, self.context) or {}
+        if not isinstance(output, dict):
+            output = {'value': output}
+        response = CommandResponse(
+            ok=True,
+            command=envelope.command,
+            command_id=envelope.command_id,
+            audit_id=new_id('audit'),
+            result=output,
+            projection={'status': 'not_required'},
+        ).to_dict()
+        self.store.save(envelope, response['audit_id'], response)
+        return response
+
+    def _execute_write(self, envelope, spec):
+        response = None
+        with transaction(self.db_path) as tx:
+            replay = self.store.find_idempotent(envelope.idempotency_key, conn=tx.connection)
+            if replay:
+                if replay.get('command') != envelope.command:
+                    raise invalid_argument('idempotency key was used for a different command')
+                response = replay['result']
+                response['replayed'] = True
+            else:
+                output = spec.handler(envelope, self.context) or {}
+                if not isinstance(output, dict):
+                    output = {'value': output}
+                projection = output.pop('projection', {'status': 'pending'})
+                if output.get('write', {}).get('rendered'):
+                    projection = {'status': 'synced', 'path': output['write']['rendered']}
+                response = CommandResponse(
+                    ok=True,
+                    command=envelope.command,
+                    command_id=envelope.command_id,
+                    audit_id=new_id('audit'),
+                    result=output,
+                    projection=projection,
+                ).to_dict()
+                self.store.save(envelope, response['audit_id'], response, conn=tx.connection)
+
+        if response and tx.deferred_renders and hasattr(db_core, 'flush_deferred_renders'):
+            render_results = db_core.flush_deferred_renders(tx.deferred_renders)
+            rendered = [item.get('rendered') for item in render_results if item.get('rendered')]
+            if rendered:
+                response['projection'] = {'status': 'synced', 'paths': rendered}
+        return response
 
     @staticmethod
     def _safe_envelope(payload):

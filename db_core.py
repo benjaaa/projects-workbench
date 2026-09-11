@@ -20,6 +20,8 @@ import subprocess
 import time
 import json
 
+from db_transaction import current_transaction
+
 # 路径常量
 VAULT = '/Users/ben/Documents/Second Brain/Second Brain'
 PROOT = '2. Project/2.1 Project'
@@ -75,6 +77,9 @@ def _date_to_ts(date_str):
 
 def _wb_conn():
     """获取业务 DB 连接（读写模式，启用外键约束）。"""
+    active = current_transaction()
+    if active:
+        return active.proxy
     conn = sqlite3.connect(WB_DB)
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA foreign_keys = ON')
@@ -361,6 +366,24 @@ def _log_change(entity_type, entity_id, field, old_value, new_value, changed_by=
 
 def _trigger_render(entity_type, entity_id):
     """触发渲染（失败进重试队列）。"""
+    active = current_transaction()
+    if active:
+        active.defer_render(entity_type, entity_id)
+        return {'ok': True, 'render_pending': True}
+    return _render_now(entity_type, entity_id)
+
+
+def flush_deferred_renders(renders):
+    """Render entities after the domain transaction has committed."""
+    results = []
+    for entity_type, entity_id in renders or []:
+        result = _render_now(entity_type, entity_id)
+        results.append({'entity_type': entity_type, 'entity_id': entity_id, **result})
+    return results
+
+
+def _render_now(entity_type, entity_id):
+    """Render outside a domain transaction."""
     try:
         import renderer
         # 获取 DB 连接（需要新连接，因为当前连接可能已关闭）

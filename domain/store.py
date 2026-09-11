@@ -15,6 +15,11 @@ class CommandStore:
         conn.row_factory = sqlite3.Row
         return conn
 
+    @staticmethod
+    def _finish(conn, owned):
+        if owned:
+            conn.close()
+
     def _ensure_schema(self):
         conn = self._connect()
         try:
@@ -51,10 +56,11 @@ class CommandStore:
         finally:
             conn.close()
 
-    def find_idempotent(self, key):
+    def find_idempotent(self, key, conn=None):
         if not key:
             return None
-        conn = self._connect()
+        owned = conn is None
+        conn = conn or self._connect()
         try:
             row = conn.execute(
                 'SELECT command, result_json FROM domain_commands WHERE idempotency_key=?',
@@ -64,12 +70,13 @@ class CommandStore:
                 return None
             return {'command': row['command'], 'result': json.loads(row['result_json'])}
         finally:
-            conn.close()
+            self._finish(conn, owned)
 
-    def save(self, envelope, audit_id, result):
+    def save(self, envelope, audit_id, result, conn=None):
         payload = json.dumps(result, ensure_ascii=False, separators=(',', ':'))
         now = int(time.time())
-        conn = self._connect()
+        owned = conn is None
+        conn = conn or self._connect()
         try:
             conn.execute(
                 '''INSERT INTO domain_commands(
@@ -114,6 +121,7 @@ class CommandStore:
                     now,
                 ),
             )
-            conn.commit()
+            if owned:
+                conn.commit()
         finally:
-            conn.close()
+            self._finish(conn, owned)

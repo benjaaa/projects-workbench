@@ -15,6 +15,8 @@ import os
 import sqlite3
 import time
 
+from db_transaction import current_transaction
+
 # 路径常量
 VAULT = '/Users/ben/Documents/Second Brain/Second Brain'
 PROOT = '2. Project/2.1 Project'
@@ -23,6 +25,9 @@ WB_DB = '/Users/ben/.hermes/profiles/business_analysis/desktop-plugins/projects-
 
 def _conn():
     """获取 DB 连接（只读模式）。"""
+    active = current_transaction()
+    if active:
+        return active.proxy
     conn = sqlite3.connect(WB_DB)
     conn.row_factory = sqlite3.Row
     return conn

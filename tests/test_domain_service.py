@@ -1,9 +1,13 @@
 import os
 import tempfile
 import unittest
+import sqlite3
+import threading
+import time
 
 from domain.service import DomainService
 from domain.mcp import MCPAdapter, tool_definitions
+from db_transaction import current_transaction
 
 
 TASK = {
@@ -56,6 +60,26 @@ class FakeCore:
         return {'ok': True, 'items': []}
 
 
+class SlowCore(FakeCore):
+    def add_log(self, path, text, changed_by=''):
+        self.calls.append(('add_log', path, text, changed_by))
+        time.sleep(0.15)
+        return {'ok': True, 'version': 3}
+
+
+class FailingCore(FakeCore):
+    def set_property(self, path, field, value, changed_by=''):
+        self.calls.append(('set_property', path, field, value, changed_by))
+        tx = current_transaction()
+        tx.connection.execute('CREATE TABLE IF NOT EXISTS effects (value TEXT)')
+        tx.connection.execute('INSERT INTO effects(value) VALUES(?)', (field,))
+        return {'ok': True, 'version': 2}
+
+    def repeat_next(self, path, changed_by=''):
+        self.calls.append(('repeat_next', path, changed_by))
+        return {'ok': False, 'error': 'BOOM'}
+
+
 class DomainServiceTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.NamedTemporaryFile(suffix='.db', delete=False)
@@ -100,6 +124,48 @@ class DomainServiceTest(unittest.TestCase):
         self.assertTrue(second['ok'])
         self.assertTrue(second.get('replayed'))
         self.assertEqual(len([call for call in self.core.calls if call[0] == 'add_log']), 1)
+
+    def test_concurrent_same_idempotency_key_executes_once(self):
+        core = SlowCore()
+        payload = self.payload('task.add_log', {'text': 'race'}, idem='race-key')
+        barrier = threading.Barrier(2)
+        results = []
+
+        def invoke():
+            service = DomainService(self.temp.name, core=core, reader=FakeReader())
+            barrier.wait()
+            results.append(service.execute(payload))
+
+        threads = [threading.Thread(target=invoke) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=5)
+
+        self.assertEqual(len(results), 2)
+        self.assertTrue(all(result['ok'] for result in results))
+        self.assertEqual(sum(1 for result in results if result.get('replayed')), 1)
+        self.assertEqual(len([call for call in core.calls if call[0] == 'add_log']), 1)
+
+    def test_failed_write_rolls_back_business_effect_and_audit(self):
+        TASK['repeat_mode'] = 'fixed'
+        try:
+            service = DomainService(self.temp.name, core=FailingCore(), reader=FakeReader())
+            result = service.execute(self.payload('task.finish', idem='rollback-key'))
+        finally:
+            TASK['repeat_mode'] = ''
+
+        self.assertFalse(result['ok'])
+        conn = sqlite3.connect(self.temp.name)
+        try:
+            effects_table = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='effects'").fetchone()
+            command_count = conn.execute('SELECT COUNT(*) FROM domain_commands').fetchone()[0]
+            audit_count = conn.execute('SELECT COUNT(*) FROM domain_audit').fetchone()[0]
+        finally:
+            conn.close()
+        self.assertIsNone(effects_table)
+        self.assertEqual(command_count, 0)
+        self.assertEqual(audit_count, 0)
 
     def test_finish_rejects_expected_status_conflict(self):
         result = self.service.execute(self.payload('task.finish', expected={'status': 'open'}, idem='finish-1'))
