@@ -122,6 +122,8 @@ class DomainServiceTest(unittest.TestCase):
         self.assertIn('task.get', names)
         self.assertIn('task.finish', names)
         self.assertIn('session.link', names)
+        self.assertIn('session.list_for_project', names)
+        self.assertIn('session.counts', names)
 
     def test_agent_write_requires_idempotency_key(self):
         result = self.service.execute(self.payload('task.add_log', {'text': 'test'}))
@@ -226,6 +228,23 @@ class DomainServiceTest(unittest.TestCase):
         result = self.service.execute(self.payload('projection.render', idem='render-1'))
         self.assertTrue(result['ok'])
         self.assertEqual(self.core.calls[0][0], 'render')
+
+    def test_project_session_reads_use_domain_commands(self):
+        conn = sqlite3.connect(self.temp.name)
+        try:
+            conn.execute('CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT)')
+            conn.execute('CREATE TABLE project_sessions (project_id TEXT, sid TEXT, linked_at INTEGER, source TEXT)')
+            conn.execute('INSERT INTO projects(id, name) VALUES(?, ?)', ('project-1', 'Test Project'))
+            conn.commit()
+        finally:
+            conn.close()
+
+        sessions = self.service.execute(self.payload('session.list_for_project', target={'project_id': 'project-1'}))
+        counts = self.service.execute(self.payload('session.counts'))
+        self.assertTrue(sessions['ok'])
+        self.assertEqual(sessions['result']['sessions'], [])
+        self.assertTrue(counts['ok'])
+        self.assertEqual(counts['result']['counts']['Test Project'], 0)
 
 
 class MCPAdapterTest(unittest.TestCase):

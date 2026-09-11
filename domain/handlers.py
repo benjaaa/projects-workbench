@@ -450,6 +450,17 @@ def session_list_by_ids(envelope, context):
     return context.repositories.list_sessions(ids)
 
 
+@command('session.list_for_project', version=1)
+def session_list_for_project(envelope, context):
+    project = _resolve_project(context, envelope.target)
+    return context.repositories.list_project_sessions(context.store.db_path, project_id=project['id'])
+
+
+@command('session.counts', version=1)
+def session_counts(envelope, context):
+    return context.repositories.session_counts(context.store.db_path)
+
+
 @command('session.codex_titles', version=1)
 def session_codex_titles(envelope, context):
     ids = envelope.input.get('ids', [])
