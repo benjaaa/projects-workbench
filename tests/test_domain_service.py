@@ -3,6 +3,7 @@ import tempfile
 import unittest
 
 from domain.service import DomainService
+from domain.mcp import MCPAdapter, tool_definitions
 
 
 TASK = {
@@ -123,6 +124,38 @@ class DomainServiceTest(unittest.TestCase):
         self.assertFalse(result['ok'])
         self.assertEqual(result['error']['code'], 'FORBIDDEN')
         self.assertEqual(self.core.calls, [])
+
+
+class MCPAdapterTest(unittest.TestCase):
+    class FakeService:
+        def __init__(self):
+            self.payload = None
+
+        def execute(self, payload):
+            self.payload = payload
+            return {'ok': True}
+
+    def test_mcp_tools_expose_safe_agent_commands(self):
+        names = {tool['name'] for tool in tool_definitions()}
+        self.assertIn('workbench_task_get', names)
+        self.assertIn('workbench_task_add_log', names)
+        self.assertNotIn('workbench_task_delete', names)
+        self.assertNotIn('workbench_project_delete', names)
+
+    def test_mcp_update_status_builds_domain_envelope(self):
+        service = self.FakeService()
+        adapter = MCPAdapter(service, actor_id='claude', session_id='thread-9')
+        adapter.call_tool('workbench_task_update_status', {
+            'task_id': 'task-1',
+            'status': 'Done',
+            'expected_status': 'In-Progress',
+            'idempotency_key': 't1:done',
+            'reason': 'acceptance passed',
+        })
+        self.assertEqual(service.payload['command'], 'task.update_field')
+        self.assertEqual(service.payload['actor']['id'], 'claude')
+        self.assertEqual(service.payload['input'], {'field': 'status', 'value': 'Done'})
+        self.assertEqual(service.payload['expected'], {'status': 'In-Progress'})
 
 
 if __name__ == '__main__':
