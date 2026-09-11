@@ -43,6 +43,28 @@ Work Station 的任务工作台。SQLite 是唯一真相源，Markdown 是只读
 ~/.codex/skills/project-workbench/scripts/read-db.py
 ```
 
+**任务详细信息的读取规则：**
+
+1. `tasks --project` 只用于发现任务，返回的是任务列表，不是完整详情。
+2. 开始执行前，必须根据任务 ID 再调用 `task <任务ID>` 读取完整详情。
+3. 读取结果在 JSON 的 `task` 字段中。必须至少解析以下字段：
+
+| 字段 | 用途 |
+|---|---|
+| `title` / `status` / `priority` / `handler` | 任务身份和执行状态 |
+| `start` / `due` / `complete` | 任务时间约束 |
+| `goal` | 任务目标 |
+| `task_detail` | 任务详情正文，执行前必须完整阅读 |
+| `acceptance_criteria` | 验收标准数组，包含文本、完成态和失败态 |
+| `logs_yaml` / `logs` | 推进记录，必须检查最新一条及等待/暂停标记 |
+| `session_ids` | 已绑定会话，用于恢复上下文 |
+| `project_id` / `path` / `dir` | 所属项目与工作目录定位 |
+| `repeat_mode` / `repeat_unit` / `repeat_every` / `repeat_day` | 周期任务闭环配置 |
+
+如果 `task_detail`、`acceptance_criteria` 或 `logs_yaml` 读取为空，报告任务信息不足或字段缺失；不要转而读取 Markdown 文件补全。
+
+常用读取命令：
+
 ```bash
 python3 ~/.codex/skills/project-workbench/scripts/read-db.py task <任务ID>
 python3 ~/.codex/skills/project-workbench/scripts/read-db.py task --title "<任务标题>" --project "<项目名>"
