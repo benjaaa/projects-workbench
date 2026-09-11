@@ -16,6 +16,19 @@ Work Station 的任务工作台。SQLite 是唯一真相源，Markdown 是只读
 5. **不臆造 ID**：任务 ID、项目 ID、会话 ID 使用 Work Station 预填或用户给出的值。
 6. **禁止高风险绕过**：Agent 不创建、重命名或删除任务/项目，不直接改 SQLite 或 Markdown；这些操作留给 UI 用户。
 
+## 任务执行前置门禁
+
+处理任何任务前，必须先调用 `read-db.py task <任务ID>`，并完整读取以下四项作为执行上下文：
+
+| 必需上下文 | 字段 | 要求 |
+|---|---|---|
+| 任务目标 | `goal` | 必须读取；不能只看任务标题或摘要 |
+| 验收标准 | `acceptance_criteria` | 必须读取全部条目、完成态和失败态 |
+| 任务详情 | `task_detail` | 必须完整读取，作为实际执行要求的主要依据 |
+| 任务跟进记录 | `logs_yaml` / `logs` | 必须读取；为空时明确记录为“无跟进记录”，不能跳过 |
+
+只有以上四项都完成读取后，才能开始执行。读取失败或字段缺失时停止并报告，不得依据 Markdown 投影自行补全上下文。
+
 ## 可调用方法目录
 
 ### 读取方法
@@ -66,7 +79,7 @@ python3 ~/.hermes/profiles/business_analysis/desktop-plugins/projects-workbench/
 
 ### 场景 A：处理任务
 
-1. `read-db.py task <任务ID>` 读取完整详情。
+1. `read-db.py task <任务ID>` 读取完整详情，并确认 `goal`、`acceptance_criteria`、`task_detail`、`logs_yaml` 四项上下文都已读取。
 2. 检查 `logs_yaml`，如果存在等待/暂停要求，停止并报告。
 3. 必要时调用 `read-db.py project --name <项目名>` 和 `read-db.py sessions --project <项目名>` 补充项目上下文。
 4. 执行任务。
