@@ -69,7 +69,7 @@ python3 wbctl.py describe
 ```text
 task.get / task.list / task.update_field / task.add_log / task.finish
 project.get / project.list / project.update_field
-draft.list / draft.create / draft.convert
+draft.list / draft.create / draft.convert / draft.delete
 session.link / session.unlink / session.list_for_project / session.counts
 kanban.status / kanban.create / kanban.complete / kanban.dispatch
 workbench.snapshot / system.describe

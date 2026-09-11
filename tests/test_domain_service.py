@@ -71,6 +71,10 @@ class FakeCore:
     def list_drafts(self, include_archived=True):
         return {'ok': True, 'items': []}
 
+    def delete_draft(self, draft_id, changed_by=''):
+        self.calls.append(('delete_draft', draft_id, changed_by))
+        return {'ok': True, 'db_deleted': True, 'file_deleted': True}
+
 
 class SlowCore(FakeCore):
     def add_log(self, path, text, changed_by=''):
@@ -245,6 +249,13 @@ class DomainServiceTest(unittest.TestCase):
         self.assertEqual(sessions['result']['sessions'], [])
         self.assertTrue(counts['ok'])
         self.assertEqual(counts['result']['counts']['Test Project'], 0)
+
+    def test_user_can_delete_draft_through_domain_command(self):
+        payload = self.payload('draft.delete', {'draft_id': 'draft-1'}, idem='draft-delete-1')
+        payload['actor'] = {'type': 'user', 'id': 'work-station'}
+        result = self.service.execute(payload)
+        self.assertTrue(result['ok'])
+        self.assertEqual(self.core.calls[0], ('delete_draft', 'draft-1', 'user:work-station'))
 
 
 class MCPAdapterTest(unittest.TestCase):

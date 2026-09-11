@@ -143,6 +143,17 @@ def draft_list(envelope, context):
     return {'drafts': result.get('items', [])}
 
 
+@command('draft.delete', version=1, write=True, allowed_actors=('user', 'system'), required_fields=('draft_id',), reason_required=True)
+def draft_delete(envelope, context):
+    result = context.db_core.delete_draft(
+        envelope.input.get('draft_id', ''),
+        changed_by=f'{envelope.actor.type}:{envelope.actor.id or "unknown"}',
+    )
+    if not result.get('ok'):
+        raise conflict(result.get('error') or 'draft.delete failed')
+    return result
+
+
 @command('projection.render', version=1, write=True, allowed_actors=('agent', 'user', 'system'), reason_required=True)
 def projection_render(envelope, context):
     target = envelope.target or {}
