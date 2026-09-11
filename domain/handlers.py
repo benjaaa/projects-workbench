@@ -154,6 +154,21 @@ def draft_delete(envelope, context):
     return result
 
 
+@command('draft.update', version=1, write=True, allowed_actors=('user', 'system'), required_fields=('draft_id', 'body'), reason_required=True)
+def draft_update(envelope, context):
+    changed_by = f'{envelope.actor.type}:{envelope.actor.id or "unknown"}'
+    result = context.repositories.update_draft_body(
+        envelope.input.get('draft_id', ''),
+        envelope.input.get('body', ''),
+        changed_by=changed_by,
+    )
+    if not result.get('ok'):
+        raise conflict(result.get('error') or 'draft.update failed')
+    context.db_core._log_change('draft', result['draft_id'], 'body', result.get('old_body', ''), envelope.input.get('body', ''), changed_by)
+    render_result = context.db_core._trigger_render('draft', result['draft_id'])
+    return {'draft_id': result['draft_id'], 'version': result.get('version'), 'write': render_result}
+
+
 @command('projection.render', version=1, write=True, allowed_actors=('agent', 'user', 'system'), reason_required=True)
 def projection_render(envelope, context):
     target = envelope.target or {}

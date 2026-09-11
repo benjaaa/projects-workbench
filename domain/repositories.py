@@ -210,6 +210,24 @@ def list_project_sessions(db_path, project_id='', project_name=''):
     return {'ok': True, 'sessions': sessions}
 
 
+def update_draft_body(draft_id_or_title, body, changed_by=''):
+    from db_transaction import current_transaction
+    active = current_transaction()
+    if not active:
+        return {'ok': False, 'error': 'draft.update requires a domain transaction'}
+    conn = active.connection
+    row = conn.execute('SELECT id, title, body, version FROM drafts WHERE id=?', (draft_id_or_title,)).fetchone()
+    if not row:
+        row = conn.execute('SELECT id, title, body, version FROM drafts WHERE title=?', (draft_id_or_title,)).fetchone()
+    if not row:
+        return {'ok': False, 'error': f'draft not found: {draft_id_or_title}'}
+    draft_id = row['id']
+    old_body = row['body'] or ''
+    new_version = (row['version'] or 1) + 1
+    conn.execute('UPDATE drafts SET body=?, updated_at=?, version=? WHERE id=?', (body, int(time.time()), new_version, draft_id))
+    return {'ok': True, 'draft_id': draft_id, 'title': row['title'], 'old_body': old_body, 'version': new_version}
+
+
 def session_counts(db_path):
     wb = _connect(db_path)
     try:

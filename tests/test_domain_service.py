@@ -68,6 +68,9 @@ class FakeCore:
         self.calls.append(('render', entity_type, entity_id))
         return {'ok': True, 'rendered': '/tmp/rendered.md'}
 
+    def _log_change(self, entity_type, entity_id, field, old_value, new_value, changed_by=''):
+        self.calls.append(('log_change', entity_type, entity_id, field, old_value, new_value, changed_by))
+
     def list_drafts(self, include_archived=True):
         return {'ok': True, 'items': []}
 
@@ -256,6 +259,31 @@ class DomainServiceTest(unittest.TestCase):
         result = self.service.execute(payload)
         self.assertTrue(result['ok'])
         self.assertEqual(self.core.calls[0], ('delete_draft', 'draft-1', 'user:work-station'))
+
+    def test_user_can_update_draft_body_through_domain_command(self):
+        conn = sqlite3.connect(self.temp.name)
+        try:
+            conn.execute('''CREATE TABLE drafts (
+                id TEXT PRIMARY KEY, title TEXT, body TEXT, ts INTEGER, status TEXT,
+                converted_task_id TEXT, created_at INTEGER, updated_at INTEGER, version INTEGER)
+            ''')
+            conn.execute('INSERT INTO drafts(id, title, body, status, version) VALUES(?,?,?,?,?)', ('draft-1', 'Draft one', 'Old body', 'open', 1))
+            conn.commit()
+        finally:
+            conn.close()
+
+        payload = self.payload('draft.update', {'draft_id': 'draft-1', 'body': 'New body'}, idem='draft-update-1')
+        payload['actor'] = {'type': 'user', 'id': 'work-station'}
+        result = self.service.execute(payload)
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['result']['version'], 2)
+        conn = sqlite3.connect(self.temp.name)
+        try:
+            body = conn.execute('SELECT body FROM drafts WHERE id=?', ('draft-1',)).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(body, 'New body')
+        self.assertIn(('render', 'draft', 'draft-1'), self.core.calls)
 
 
 class MCPAdapterTest(unittest.TestCase):
