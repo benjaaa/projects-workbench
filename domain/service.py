@@ -4,6 +4,7 @@ import db_core
 import db_read
 
 from . import handlers  # noqa: F401 - registers command handlers
+from . import repositories
 from .errors import DomainError, forbidden, invalid_argument
 from .models import Actor, CommandEnvelope, CommandResponse, new_id
 from .registry import registry
@@ -19,6 +20,7 @@ class DomainContext:
     db_read: object
     registry: object
     store: object
+    repositories: object
 
 
 class DomainService:
@@ -30,6 +32,7 @@ class DomainService:
             db_read=reader or db_read,
             registry=self.registry,
             store=self.store,
+            repositories=repositories,
         )
 
     def execute(self, payload):

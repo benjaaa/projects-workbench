@@ -67,6 +67,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     add_actor_args(parser)
     sub = parser.add_subparsers(dest='resource', required=True)
+    sub.add_parser('describe')
 
     task = sub.add_parser('task')
     task_sub = task.add_subparsers(dest='action', required=True)
@@ -121,7 +122,9 @@ def main():
     args = parser.parse_args()
     service = DomainService(os.path.join(SCRIPT_DIR, 'workbench.db'))
 
-    if args.resource == 'task' and args.action == 'get':
+    if args.resource == 'describe':
+        payload = {'command': 'system.describe', 'version': 1, 'actor': {'type': 'agent', 'id': args.actor_id, 'session_id': args.session}}
+    elif args.resource == 'task' and args.action == 'get':
         payload = build_execute(args, 'task.get', task_target(args))
     elif args.resource == 'task' and args.action == 'list':
         payload = build_execute(args, 'task.list', input_data={'project': args.project, 'status': args.status, 'limit': args.limit})

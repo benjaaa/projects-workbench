@@ -369,3 +369,95 @@ def draft_convert(envelope, context):
     if not result.get('ok'):
         raise conflict(result.get('error') or 'draft.convert failed')
     return result
+
+
+@command('task.repeat_next', version=1, write=True, allowed_actors=('user', 'system', 'integration'), reason_required=True)
+def task_repeat_next(envelope, context):
+    task = _resolve_task(context, envelope.target)
+    result = context.db_core.repeat_next(task['path'], changed_by=f'{envelope.actor.type}:{envelope.actor.id or "unknown"}')
+    if not result.get('ok') and result.get('error') not in ('EXISTS', 'NO_REPEAT'):
+        raise conflict(result.get('error') or 'task.repeat_next failed')
+    return result
+
+
+@command('log.edit_entry', version=1, write=True, allowed_actors=('user', 'system', 'integration'), required_fields=('entry_id', 'yaml_text'), reason_required=True)
+def log_edit_entry(envelope, context):
+    task = _resolve_task(context, envelope.target)
+    result = context.db_core.edit_yaml_log(
+        task['path'],
+        envelope.input['entry_id'],
+        envelope.input['yaml_text'],
+        changed_by=f'{envelope.actor.type}:{envelope.actor.id or "unknown"}',
+    )
+    if not result.get('ok'):
+        raise conflict(result.get('error') or 'log.edit_entry failed')
+    return result
+
+
+@command('ops.log', version=1, write=True, allowed_actors=('user', 'system', 'integration'), required_fields=('action',), reason_required=True)
+def ops_log(envelope, context):
+    context.db_core._log_op(
+        f'{envelope.actor.type}:{envelope.actor.id or "unknown"}',
+        envelope.input.get('action', ''),
+        envelope.input.get('entity_type', ''),
+        envelope.input.get('entity_id', ''),
+        envelope.input.get('detail', ''),
+    )
+    return {'logged': True}
+
+
+@command('project.path', version=1)
+def project_path(envelope, context):
+    return context.repositories.resolve_project_path(
+        context.db_core.WB_DB,
+        context.db_core.VAULT,
+        context.db_core.PROOT,
+        project_id=envelope.target.get('project_id', ''),
+        name=envelope.target.get('name', ''),
+    )
+
+
+@command('session.unlink', version=1, write=True, allowed_actors=('agent', 'user', 'system'), required_fields=('sid',), reason_required=True)
+def session_unlink(envelope, context):
+    return context.repositories.unlink_session(
+        context.db_core.WB_DB,
+        path=envelope.target.get('path', ''),
+        sid=envelope.input.get('sid', ''),
+    )
+
+
+@command('session.list_by_ids', version=1)
+def session_list_by_ids(envelope, context):
+    ids = envelope.input.get('ids', [])
+    if isinstance(ids, str):
+        ids = [value.strip() for value in ids.split(',') if value.strip()]
+    return context.repositories.list_sessions(ids)
+
+
+@command('session.codex_titles', version=1)
+def session_codex_titles(envelope, context):
+    ids = envelope.input.get('ids', [])
+    if isinstance(ids, str):
+        ids = [value.strip() for value in ids.split(',') if value.strip()]
+    return context.repositories.list_codex_thread_titles(ids)
+
+
+def _kanban_command(name, agent_allowed=False):
+    actors = ('agent', 'user', 'system', 'integration') if agent_allowed else ('user', 'system', 'integration')
+    @command(name, version=1, write=True, allowed_actors=actors, reason_required=True)
+    def handler(envelope, context):
+        data = dict(envelope.input or {})
+        data['changed_by'] = f'{envelope.actor.type}:{envelope.actor.id or "unknown"}'
+        result = context.db_core.kanban_bridge(name.replace('kanban.', 'kanban_'), data)
+        if isinstance(result, dict) and result.get('ok') is False:
+            raise conflict(result.get('error') or f'{name} failed')
+        return result if isinstance(result, dict) else {'result': result}
+    return handler
+
+
+kanban_status = _kanban_command('kanban.status')
+kanban_worker_session = _kanban_command('kanban.worker_session')
+kanban_link_session = _kanban_command('kanban.link_session')
+kanban_dispatch = _kanban_command('kanban.dispatch')
+kanban_create = _kanban_command('kanban.create')
+kanban_complete = _kanban_command('kanban.complete')
