@@ -1,128 +1,141 @@
 ---
 name: project-workbench
-description: Process Work Station (projects-workbench) tasks through the shared domain command layer. Use for Work Station task references, task/project IDs or names, 处理任务, 处理项目, /project-workbench, and project-workbench skill prompts. Read through the domain CLI, execute the task, and register progress or completion only when the user asks or the task workflow requires it.
+description: Process Work Station (projects-workbench) tasks through the shared domain command layer. Use for Work Station task references, task/project IDs or names, 处理任务, 处理项目, /project-workbench, and project-workbench skill prompts. This skill declares the callable methods and the ordered method chains required for common scenarios.
 ---
 
 # Project Workbench
 
-Work Station 的任务工作台。SQLite 是唯一真相源，Markdown 是只读投影。所有读取、写入都经过领域命令层，禁止直接访问数据库、frontmatter 或投影文件。
+Work Station 的任务工作台。SQLite 是唯一真相源，Markdown 是只读投影。读取和写入都必须经过领域命令层，禁止直接访问数据库、frontmatter 或投影文件。
 
-## 原则
+## 基本原则
 
-1. **先读后动**：先读取任务完整信息，包括目标、任务详情、验收标准、最近推进记录和已绑定会话。
-2. **使用领域命令**：读取使用 `scripts/read-db.py`，写入使用 `wbctl.py task ...`。不要直接执行 SQL、修改 `workbench.db` 或编辑 `任务-*.md` / `项目说明-*.md`。
-3. **不臆造 ID**：任务 ID、项目 ID 使用 Work Station 预填或用户给出的值。
-4. **尊重状态**：如果推进记录表示等待、暂停或不要开始，停止并报告。
-5. **有明确意图才写**：只有用户明确要求记录、推进或完成任务，或者任务流程明确要求闭环时，才执行写命令。
-6. **汇报可追溯**：说明结果、验证方式、遗留风险和使用的命令；重试时复用同一个幂等键。
-7. **高风险操作留给用户**：Agent 不重命名、删除任务或项目，不创建项目。
+1. **先读后动**：执行任务前必须读取完整任务详情，不能只依赖任务列表或对话摘要。
+2. **按场景调用方法链**：一个场景通常需要多个方法，顺序是“读取 → 检查状态 → 执行 → 写入 → 再次读取验证”。
+3. **写入带审计信息**：写方法必须提供 `--reason` 和稳定的 `--idempotency-key`。
+4. **尊重状态和下一步**：推进记录明确说等待、暂停或不要开始，停止并报告。
+5. **不臆造 ID**：任务 ID、项目 ID、会话 ID 使用 Work Station 预填或用户给出的值。
+6. **禁止高风险绕过**：Agent 不创建、重命名或删除任务/项目，不直接改 SQLite 或 Markdown；这些操作留给 UI 用户。
 
-## Pipeline
+## 可调用方法目录
 
-### 1. 识别触发
+### 读取方法
 
-任务引用示例：
+脚本：`~/.codex/skills/project-workbench/scripts/read-db.py`
 
-```text
-处理任务 -- 任务名称：<任务标题>（任务ID：<id>）
-```
+| 方法 | 作用 | 返回值 |
+|---|---|---|
+| `tasks --project "<项目名>"` | 发现项目下的任务 | `tasks` 列表，只含摘要，不是完整详情 |
+| `task <任务ID>` | 读取单个任务完整详情 | `task` 对象，含目标、详情、验收、日志、会话、周期配置 |
+| `task --title "<标题>" --project "<项目名>"` | 按标题读取完整详情 | 同上 |
+| `project <项目ID>` | 读取项目详情 | `project` 对象 |
+| `project --name "<项目名>"` | 按名称读取项目详情 | 同上 |
+| `sessions --project "<项目名>"` | 读取项目关联会话 | `sessions` 列表，含 Codex/Hermes 来源、标题和活动时间 |
 
-兼容 `/project-workbench 处理任务 -- ...`、`请使用 project-workbench skill 处理任务 -- ...`。
+读取任务详情后必须检查：`goal`、`task_detail`、`acceptance_criteria`、`logs_yaml`、`session_ids`、`project_id`、`path`、`repeat_*`。任务详情为空时报告信息不足，禁止读取 Markdown 补全。
 
-项目引用示例：
+### 写入方法
 
-```text
-处理项目 -- 项目名称：<项目名>（项目ID：<id>）
-```
+脚本：`~/.hermes/profiles/business_analysis/desktop-plugins/projects-workbench/wbctl.py`
 
-### 2. 读取任务或项目
+所有写方法都要传 `--idempotency-key` 和 `--reason`。
 
-脚本路径：
+| 方法 | 作用 | 关键参数 |
+|---|---|---|
+| `task update-field` | 更新任务字段 | `--task-id`、`--field`、`--value` |
+| `task update-status` | 更新任务状态 | `--task-id`、`--status`、`--expected-status` |
+| `task toggle-acceptance` | 切换验收项状态 | `--task-id`、`--index` |
+| `task update-section` | 更新目标或任务详情等区段 | `--task-id`、`--section`、`--text` |
+| `task add-log` | 追加推进记录 | `--task-id`、`--text` |
+| `task finish` | 完成任务并处理周期任务 | `--task-id`、`--expected-status` |
+| `project update-field` | 更新项目安全字段 | `--project-id` 或 `--name`、`--field`、`--value` |
+| `project update-section` | 更新项目背景或目标 | `--project-id` 或 `--name`、`--section`、`--text` |
+| `session link` | 绑定任务与会话 | `--task-id`、`--sid`、`--source` |
+| `projection render` | 手动刷新投影 | `--task-id` 或 `--project-id` 或 `--path` |
 
-```text
-~/.codex/skills/project-workbench/scripts/read-db.py
-```
-
-**任务详细信息的读取规则：**
-
-1. `tasks --project` 只用于发现任务，返回的是任务列表，不是完整详情。
-2. 开始执行前，必须根据任务 ID 再调用 `task <任务ID>` 读取完整详情。
-3. 读取结果在 JSON 的 `task` 字段中。必须至少解析以下字段：
-
-| 字段 | 用途 |
-|---|---|
-| `title` / `status` / `priority` / `handler` | 任务身份和执行状态 |
-| `start` / `due` / `complete` | 任务时间约束 |
-| `goal` | 任务目标 |
-| `task_detail` | 任务详情正文，执行前必须完整阅读 |
-| `acceptance_criteria` | 验收标准数组，包含文本、完成态和失败态 |
-| `logs_yaml` / `logs` | 推进记录，必须检查最新一条及等待/暂停标记 |
-| `session_ids` | 已绑定会话，用于恢复上下文 |
-| `project_id` / `path` / `dir` | 所属项目与工作目录定位 |
-| `repeat_mode` / `repeat_unit` / `repeat_every` / `repeat_day` | 周期任务闭环配置 |
-
-如果 `task_detail`、`acceptance_criteria` 或 `logs_yaml` 读取为空，报告任务信息不足或字段缺失；不要转而读取 Markdown 文件补全。
-
-常用读取命令：
-
-```bash
-python3 ~/.codex/skills/project-workbench/scripts/read-db.py task <任务ID>
-python3 ~/.codex/skills/project-workbench/scripts/read-db.py task --title "<任务标题>" --project "<项目名>"
-python3 ~/.codex/skills/project-workbench/scripts/read-db.py project <项目ID>
-python3 ~/.codex/skills/project-workbench/scripts/read-db.py project --name "<项目名>"
-python3 ~/.codex/skills/project-workbench/scripts/read-db.py tasks --project "<项目名>"
-```
-
-输出为标准 JSON。读取失败时停止并报告，不要根据 Markdown 推断任务内容。
-
-### 3. 执行任务
-
-在任务详情给出的工作区和上下文中执行；只做任务目标、任务详情和验收标准要求的事情。
-
-任务状态变化、推进记录和验收勾选必须通过领域命令完成。示例：
-
-```bash
-WB=~/.hermes/profiles/business_analysis/desktop-plugins/projects-workbench/wbctl.py
-
-python3 $WB task add-log --task-id <任务ID> --text "<推进记录>" \
-  --idempotency-key "<stable-key>" --reason "task progress"
-
-python3 $WB task finish --task-id <任务ID> --expected-status In-Progress \
-  --idempotency-key "<stable-key>" --reason "acceptance passed"
-```
-
-`task.finish` 会在需要时自动生成下一周期任务。不要手工创建下一周期任务，也不要直接改状态绕过状态机。
-
-### 4. 汇报
-
-回复包含：
-
-- 任务 ID / 项目 ID
-- 结果摘要
-- 验证方式和证据
-- 遗留风险或待人工确认事项
-- 如果调用了写命令，列出命令、幂等键和返回的 `command_id` / `audit_id`
-
-可粘贴的推进记录 YAML：
-
-```yaml
-- date: MM-DD HH:mm:ss
-  id: YYYYMMDD_HHmmss
-  type: codex
-  summary: 完成<任务标题>：<结果摘要>
-  sessions:
-    - id: <当前会话id>
-      source: codex
-  pending:
-    - <待人工确认事项>
-```
-
-## 命令参考
-
-命令、权限和错误码的权威来源：
+命令目录和权限矩阵的权威来源：
 
 ```bash
 python3 ~/.hermes/profiles/business_analysis/desktop-plugins/projects-workbench/wbctl.py describe
 ```
 
-如果当前环境提供 Workbench MCP 工具，优先使用只读的 `workbench_task_get`、`workbench_task_list`、`workbench_project_get`；写入前确认工具要求 `reason` 和 `idempotency_key`。
+### 禁止 Agent 调用的方法
+
+`task create`、`task rename`、`task delete`、`project create`、`project rename`、`project delete` 和直接 SQL/文件写入。收到这类请求时，说明需要用户在 Work Station UI 中完成。
+
+## 场景到方法链
+
+### 场景 A：处理任务
+
+1. `read-db.py task <任务ID>` 读取完整详情。
+2. 检查 `logs_yaml`，如果存在等待/暂停要求，停止并报告。
+3. 必要时调用 `read-db.py project --name <项目名>` 和 `read-db.py sessions --project <项目名>` 补充项目上下文。
+4. 执行任务。
+5. 如用户要求记录推进：`wbctl task add-log`。
+6. 如满足完成条件：逐项 `wbctl task toggle-acceptance`，然后 `wbctl task finish --expected-status <当前状态>`。
+7. 再次调用 `read-db.py task <任务ID>` 验证状态、验收和日志已经生效。
+8. 汇报任务 ID、执行结果、验证证据、日志命令和 `command_id` / `audit_id`。
+
+### 场景 B：只写推进记录
+
+1. `read-db.py task <任务ID>`。
+2. `wbctl task add-log --task-id <ID> --text <记录> --idempotency-key <键> --reason <原因>`。
+3. `read-db.py task <任务ID>`，确认 `logs_yaml` 出现新记录。
+4. 不要顺手修改状态或验收。
+
+### 场景 C：完成任务
+
+1. `read-db.py task <任务ID>`，确认当前状态和验收标准。
+2. 对已完成验收项调用 `wbctl task toggle-acceptance --index <索引>`。
+3. 调用 `wbctl task finish --task-id <ID> --expected-status <当前状态>`。
+4. `read-db.py task <任务ID>` 验证 `status=Done`。
+5. 如果返回 `next_task` 或周期任务信息，汇报下一周期结果。
+
+### 场景 D：修改任务目标或详情
+
+1. `read-db.py task <任务ID>`。
+2. `wbctl task update-section --task-id <ID> --section "目标|任务详情" --text <全文>`。
+3. `read-db.py task <任务ID>` 验证对应字段。
+4. 更新详情不等于完成任务，不要自动调用 `task.finish`。
+
+### 场景 E：更新任务字段
+
+1. `read-db.py task <任务ID>`。
+2. `wbctl task update-field` 或 `wbctl task update-status`。
+3. `read-db.py task <任务ID>` 验证新值。
+4. 涉及状态流转时使用 `--expected-status`，遇到冲突停止，不强制覆盖。
+
+### 场景 F：处理项目
+
+1. `read-db.py project --name <项目名>` 读取项目详情。
+2. `read-db.py tasks --project <项目名>` 读取任务列表。
+3. 对需要处理的任务逐个执行场景 A；不要只看任务列表直接批量写入。
+4. 项目级结果需要记录时，使用 `wbctl project update-section` 或 `wbctl task add-log`，然后重新读取验证。
+
+### 场景 G：修改项目字段或背景
+
+1. `read-db.py project --name <项目名>`。
+2. 字段使用 `wbctl project update-field`，背景/目标使用 `wbctl project update-section`。
+3. `read-db.py project --name <项目名>` 验证。
+4. 项目改名留给 UI 用户，不要调用 `project rename`。
+
+### 场景 H：关联会话
+
+1. `read-db.py task <任务ID>` 或 `read-db.py project --name <项目名>`。
+2. `wbctl session link --task-id <ID> --sid <会话ID> --source codex`。
+3. 再次读取任务或项目，确认 `session_ids` 包含新会话。
+4. 重试时复用原幂等键。
+
+### 场景 I：重试一次写操作
+
+1. 不要重新生成幂等键。
+2. 使用第一次调用相同的 `--idempotency-key` 重试。
+3. 读取目标实体验证最终状态；如果返回 `replayed=true`，说明没有重复写入。
+
+## 汇报格式
+
+- 任务 ID / 项目 ID
+- 执行结果摘要
+- 使用的读取方法链
+- 使用的写入方法、幂等键、`command_id`、`audit_id`
+- 验证方式和证据
+- 遗留风险或待人工确认事项

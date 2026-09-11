@@ -16,7 +16,7 @@ def usage():
 
 
 def parse_args(args):
-    if not args or args[0] not in ('task', 'project', 'tasks'):
+    if not args or args[0] not in ('task', 'project', 'tasks', 'sessions'):
         return None
     kind = args[0]
     command = []
@@ -42,11 +42,22 @@ def parse_args(args):
             else:
                 command.extend(['--project-id', args[i]])
                 i += 1
-    else:
+    elif kind == 'tasks':
         command = ['task', 'list']
         while i < len(args):
             if args[i] == '--project' and i + 1 < len(args):
                 command.extend(['--project', args[i + 1]])
+                i += 2
+            else:
+                return None
+    else:
+        command = ['session', 'list-for-project']
+        while i < len(args):
+            if args[i] == '--project' and i + 1 < len(args):
+                command.extend(['--name', args[i + 1]])
+                i += 2
+            elif args[i] == '--project-id' and i + 1 < len(args):
+                command.extend(['--project-id', args[i + 1]])
                 i += 2
             else:
                 return None

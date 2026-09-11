@@ -169,6 +169,14 @@ def main():
     p.add_argument('--source', default='codex')
     add_write_args(p)
 
+    p = session_sub.add_parser('list-for-project')
+    add_project_locator(p)
+
+    p = session_sub.add_parser('counts')
+
+    p = session_sub.add_parser('codex-titles')
+    p.add_argument('--ids', required=True, help='comma-separated Codex thread ids')
+
     args = parser.parse_args()
     service = DomainService(os.path.join(SCRIPT_DIR, 'workbench.db'))
 
@@ -214,6 +222,13 @@ def main():
         payload = build_execute(args, 'projection.render', target, write=True)
     elif args.resource == 'session' and args.action == 'link':
         payload = build_execute(args, 'session.link', task_target(args), {'sid': args.sid, 'source': args.source}, write=True)
+    elif args.resource == 'session' and args.action == 'list-for-project':
+        payload = build_execute(args, 'session.list_for_project', project_target(args))
+    elif args.resource == 'session' and args.action == 'counts':
+        payload = build_execute(args, 'session.counts')
+    elif args.resource == 'session' and args.action == 'codex-titles':
+        ids = [value.strip() for value in args.ids.split(',') if value.strip()]
+        payload = build_execute(args, 'session.codex_titles', input_data={'ids': ids})
     else:
         return output({'ok': False, 'error': {'code': 'INVALID_COMMAND', 'message': 'unsupported command'}})
 
