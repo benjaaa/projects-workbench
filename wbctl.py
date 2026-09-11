@@ -155,7 +155,10 @@ def main():
     projection = sub.add_parser('projection')
     projection_sub = projection.add_subparsers(dest='action', required=True)
     p = projection_sub.add_parser('render')
-    p.add_argument('--path', required=True)
+    locator = p.add_mutually_exclusive_group(required=True)
+    locator.add_argument('--task-id')
+    locator.add_argument('--project-id')
+    locator.add_argument('--path')
     add_write_args(p)
 
     session = sub.add_parser('session')
@@ -202,7 +205,13 @@ def main():
     elif args.resource == 'draft' and args.action == 'list':
         payload = build_execute(args, 'draft.list', input_data={'include_archived': args.include_archived})
     elif args.resource == 'projection' and args.action == 'render':
-        payload = build_execute(args, 'projection.render', {'path': args.path}, write=True)
+        if args.task_id:
+            target = {'task_id': args.task_id}
+        elif args.project_id:
+            target = {'project_id': args.project_id}
+        else:
+            target = {'path': args.path}
+        payload = build_execute(args, 'projection.render', target, write=True)
     elif args.resource == 'session' and args.action == 'link':
         payload = build_execute(args, 'session.link', task_target(args), {'sid': args.sid, 'source': args.source}, write=True)
     else:
