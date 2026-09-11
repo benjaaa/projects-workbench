@@ -75,6 +75,12 @@ def add_project_locator(parser):
     group.add_argument('--name')
 
 
+def draft_target(args):
+    if getattr(args, 'draft_id', ''):
+        return {'draft_id': args.draft_id}
+    return {'title': getattr(args, 'title', '')}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     add_actor_args(parser)
@@ -152,6 +158,11 @@ def main():
     p = draft_sub.add_parser('list')
     p.add_argument('--include-archived', action='store_true', default=True)
 
+    p = draft_sub.add_parser('get')
+    group = p.add_mutually_exclusive_group(required=True)
+    group.add_argument('--draft-id')
+    group.add_argument('--title')
+
     projection = sub.add_parser('projection')
     projection_sub = projection.add_subparsers(dest='action', required=True)
     p = projection_sub.add_parser('render')
@@ -212,6 +223,8 @@ def main():
         payload = build_execute(args, 'project.list', input_data={'status': args.status, 'limit': args.limit})
     elif args.resource == 'draft' and args.action == 'list':
         payload = build_execute(args, 'draft.list', input_data={'include_archived': args.include_archived})
+    elif args.resource == 'draft' and args.action == 'get':
+        payload = build_execute(args, 'draft.get', draft_target(args))
     elif args.resource == 'projection' and args.action == 'render':
         if args.task_id:
             target = {'task_id': args.task_id}

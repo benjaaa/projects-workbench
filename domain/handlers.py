@@ -143,6 +143,23 @@ def draft_list(envelope, context):
     return {'drafts': result.get('items', [])}
 
 
+@command('draft.get', version=1)
+def draft_get(envelope, context):
+    reference = str((envelope.input or {}).get('draft_id') or (envelope.target or {}).get('draft_id') or '').strip()
+    title = str((envelope.input or {}).get('title') or (envelope.target or {}).get('title') or '').strip()
+    if not reference and not title:
+        raise invalid_argument('draft_id or title is required')
+    result = context.db_core.list_drafts(include_archived=True)
+    if not result.get('ok'):
+        raise invalid_argument(result.get('error') or 'draft.get failed')
+    for item in result.get('items', []):
+        if reference and item.get('draft_id') == reference:
+            return {'draft': item}
+        if title and item.get('title') == title:
+            return {'draft': item}
+    raise not_found(f'draft not found: {reference or title}')
+
+
 @command('draft.delete', version=1, write=True, allowed_actors=('user', 'system'), required_fields=('draft_id',), reason_required=True)
 def draft_delete(envelope, context):
     result = context.db_core.delete_draft(

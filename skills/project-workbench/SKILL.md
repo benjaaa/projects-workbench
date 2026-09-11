@@ -40,6 +40,8 @@ Work Station 的任务工作台。SQLite 是唯一真相源，Markdown 是只读
 | `tasks --project "<项目名>"` | 发现项目下的任务 | `tasks` 列表，只含摘要，不是完整详情 |
 | `task <任务ID>` | 读取单个任务完整详情 | `task` 对象，含目标、详情、验收、日志、会话、周期配置 |
 | `task --title "<标题>" --project "<项目名>"` | 按标题读取完整详情 | 同上 |
+| `draft <DraftID>` | 读取单个 Draft 详情 | `draft` 对象，含标题、正文、状态和时间 |
+| `drafts` | 列出全部 Draft | `drafts` 列表 |
 | `project <项目ID>` | 读取项目详情 | `project` 对象 |
 | `project --name "<项目名>"` | 按名称读取项目详情 | 同上 |
 | `sessions --project "<项目名>"` | 读取项目关联会话 | `sessions` 列表，含 Codex/Hermes 来源、标题和活动时间 |
@@ -138,7 +140,18 @@ python3 ~/.hermes/profiles/business_analysis/desktop-plugins/projects-workbench/
 3. 再次读取任务或项目，确认 `session_ids` 包含新会话。
 4. 重试时复用原幂等键。
 
-### 场景 I：重试一次写操作
+
+### 场景 I：处理 Draft
+
+Draft 预填格式：`处理 Draft -- Draft 名称：<标题>（Draft ID：<id>）`。
+
+1. 从 Draft 预填消息中读取 `Draft ID`。
+2. 调用 `read-db.py draft <DraftID>` 读取 Draft 正文、状态和时间。
+3. 不要把 Inbox Markdown 路径当作数据源，也不要直接编辑投影文件。
+4. 按 Draft 正文处理；处理完成后由用户在 Work Station 中决定是否转为任务。
+5. 后续如需再次读取，继续使用 `draft <DraftID>`，不要依赖文档内容。
+
+### 场景 J：重试一次写操作
 
 1. 不要重新生成幂等键。
 2. 使用第一次调用相同的 `--idempotency-key` 重试。
