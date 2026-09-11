@@ -63,6 +63,18 @@ def add_task_locator(parser):
     parser.add_argument('--project', default='')
 
 
+def project_target(args):
+    if getattr(args, 'project_id', ''):
+        return {'project_id': args.project_id}
+    return {'name': getattr(args, 'name', '')}
+
+
+def add_project_locator(parser):
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument('--project-id')
+    group.add_argument('--name')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     add_actor_args(parser)
@@ -74,6 +86,23 @@ def main():
 
     p = task_sub.add_parser('get')
     add_task_locator(p)
+
+    p = task_sub.add_parser('update-field')
+    add_task_locator(p)
+    p.add_argument('--field', required=True)
+    p.add_argument('--value', required=True)
+    add_write_args(p)
+
+    p = task_sub.add_parser('toggle-acceptance')
+    add_task_locator(p)
+    p.add_argument('--index', type=int, required=True)
+    add_write_args(p)
+
+    p = task_sub.add_parser('update-section')
+    add_task_locator(p)
+    p.add_argument('--section', required=True)
+    p.add_argument('--text', required=True)
+    add_write_args(p)
 
     p = task_sub.add_parser('list')
     p.add_argument('--project', default='')
@@ -106,10 +135,28 @@ def main():
     p.add_argument('--status', default='')
     p.add_argument('--limit', type=int, default=200)
 
+    p = project_sub.add_parser('update-field')
+    add_project_locator(p)
+    p.add_argument('--field', required=True)
+    p.add_argument('--value', required=True)
+    add_write_args(p)
+
+    p = project_sub.add_parser('update-section')
+    add_project_locator(p)
+    p.add_argument('--section', required=True)
+    p.add_argument('--text', required=True)
+    add_write_args(p)
+
     draft = sub.add_parser('draft')
     draft_sub = draft.add_subparsers(dest='action', required=True)
     p = draft_sub.add_parser('list')
     p.add_argument('--include-archived', action='store_true', default=True)
+
+    projection = sub.add_parser('projection')
+    projection_sub = projection.add_subparsers(dest='action', required=True)
+    p = projection_sub.add_parser('render')
+    p.add_argument('--path', required=True)
+    add_write_args(p)
 
     session = sub.add_parser('session')
     session_sub = session.add_subparsers(dest='action', required=True)
@@ -126,6 +173,12 @@ def main():
         payload = {'command': 'system.describe', 'version': 1, 'actor': {'type': 'agent', 'id': args.actor_id, 'session_id': args.session}}
     elif args.resource == 'task' and args.action == 'get':
         payload = build_execute(args, 'task.get', task_target(args))
+    elif args.resource == 'task' and args.action == 'update-field':
+        payload = build_execute(args, 'task.update_field', task_target(args), {'field': args.field, 'value': args.value}, write=True)
+    elif args.resource == 'task' and args.action == 'toggle-acceptance':
+        payload = build_execute(args, 'task.toggle_acceptance', task_target(args), {'index': args.index}, write=True)
+    elif args.resource == 'task' and args.action == 'update-section':
+        payload = build_execute(args, 'task.update_section', task_target(args), {'section': args.section, 'text': args.text}, write=True)
     elif args.resource == 'task' and args.action == 'list':
         payload = build_execute(args, 'task.list', input_data={'project': args.project, 'status': args.status, 'limit': args.limit})
     elif args.resource == 'task' and args.action == 'update-status':
@@ -140,10 +193,16 @@ def main():
     elif args.resource == 'project' and args.action == 'get':
         target = {'project_id': args.project_id} if args.project_id else {'name': args.name}
         payload = build_execute(args, 'project.get', target)
+    elif args.resource == 'project' and args.action == 'update-field':
+        payload = build_execute(args, 'project.update_field', project_target(args), {'field': args.field, 'value': args.value}, write=True)
+    elif args.resource == 'project' and args.action == 'update-section':
+        payload = build_execute(args, 'project.update_section', project_target(args), {'section': args.section, 'text': args.text}, write=True)
     elif args.resource == 'project' and args.action == 'list':
         payload = build_execute(args, 'project.list', input_data={'status': args.status, 'limit': args.limit})
     elif args.resource == 'draft' and args.action == 'list':
         payload = build_execute(args, 'draft.list', input_data={'include_archived': args.include_archived})
+    elif args.resource == 'projection' and args.action == 'render':
+        payload = build_execute(args, 'projection.render', {'path': args.path}, write=True)
     elif args.resource == 'session' and args.action == 'link':
         payload = build_execute(args, 'session.link', task_target(args), {'sid': args.sid, 'source': args.source}, write=True)
     else:

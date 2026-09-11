@@ -56,6 +56,18 @@ class FakeCore:
         self.calls.append(('link_session', kwargs))
         return {'ok': True}
 
+    def update_section(self, path, section, text, changed_by=''):
+        self.calls.append(('update_section', path, section, text, changed_by))
+        return {'ok': True, 'version': 4}
+
+    def toggle_ac(self, path, index, changed_by=''):
+        self.calls.append(('toggle_ac', path, index, changed_by))
+        return {'ok': True, 'version': 5}
+
+    def _trigger_render(self, entity_type, entity_id):
+        self.calls.append(('render', entity_type, entity_id))
+        return {'ok': True, 'rendered': '/tmp/rendered.md'}
+
     def list_drafts(self, include_archived=True):
         return {'ok': True, 'items': []}
 
@@ -90,12 +102,13 @@ class DomainServiceTest(unittest.TestCase):
     def tearDown(self):
         os.unlink(self.temp.name)
 
-    def payload(self, command, input_data=None, expected=None, idem=''):
+
+    def payload(self, command, input_data=None, expected=None, idem='', target=None):
         return {
             'command': command,
             'version': 1,
             'actor': {'type': 'agent', 'id': 'codex', 'session_id': 'thread-1'},
-            'target': {'task_id': 'task-1'},
+            'target': target or {'task_id': 'task-1'},
             'input': input_data or {},
             'expected': expected or {},
             'idempotency_key': idem,
@@ -190,6 +203,29 @@ class DomainServiceTest(unittest.TestCase):
         self.assertFalse(result['ok'])
         self.assertEqual(result['error']['code'], 'FORBIDDEN')
         self.assertEqual(self.core.calls, [])
+
+    def test_agent_can_update_task_content_and_acceptance(self):
+        section = self.service.execute(self.payload('task.update_section', {'section': '任务详情', 'text': 'Body'}, idem='section-1'))
+        acceptance = self.service.execute(self.payload('task.toggle_acceptance', {'index': 0}, idem='acceptance-1'))
+        self.assertTrue(section['ok'])
+        self.assertTrue(acceptance['ok'])
+        self.assertEqual([call[0] for call in self.core.calls], ['update_section', 'toggle_ac'])
+
+    def test_agent_cannot_rename_project_through_update_field(self):
+        result = self.service.execute(self.payload(
+            'project.update_field',
+            {'field': 'name', 'value': 'Renamed'},
+            idem='project-name-1',
+            target={'project_id': 'project-1'},
+        ))
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['error']['code'], 'FORBIDDEN')
+        self.assertEqual(self.core.calls, [])
+
+    def test_agent_can_request_projection_render(self):
+        result = self.service.execute(self.payload('projection.render', idem='render-1'))
+        self.assertTrue(result['ok'])
+        self.assertEqual(self.core.calls[0][0], 'render')
 
 
 class MCPAdapterTest(unittest.TestCase):

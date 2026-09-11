@@ -5,6 +5,7 @@ from .registry import command
 TASK_AGENT_FIELDS = {'status', 'priority', 'handler', 'due', 'start'}
 TASK_USER_FIELDS = TASK_AGENT_FIELDS | {'complete', 'title', 'repeat_anchor', 'repeat_mode', 'repeat_unit', 'repeat_every', 'repeat_day'}
 PROJECT_FIELDS = {'status', 'start', 'due', 'complete', 'name'}
+PROJECT_AGENT_FIELDS = {'status', 'start', 'due', 'complete'}
 
 
 def _require_value(value, name):
@@ -142,6 +143,19 @@ def draft_list(envelope, context):
     return {'drafts': result.get('items', [])}
 
 
+@command('projection.render', version=1, write=True, allowed_actors=('agent', 'user', 'system'), reason_required=True)
+def projection_render(envelope, context):
+    target = envelope.target or {}
+    path = str(target.get('path') or '').strip()
+    if path and '/tasks/' not in path:
+        project = _resolve_project(context, target)
+        result = context.db_core._trigger_render('project', project['id'])
+    else:
+        task = _resolve_task(context, target)
+        result = context.db_core._trigger_render('task', task['id'])
+    return {'render': result}
+
+
 @command(
     'task.update_field',
     version=1,
@@ -235,12 +249,14 @@ def session_link(envelope, context):
     return {'link': result}
 
 
-@command('project.update_field', version=1, write=True, allowed_actors=('user', 'system', 'integration'), required_fields=('field', 'value'), reason_required=True)
+@command('project.update_field', version=1, write=True, allowed_actors=('user', 'agent', 'system', 'integration'), required_fields=('field', 'value'), reason_required=True)
 def project_update_field(envelope, context):
     project = _resolve_project(context, envelope.target)
     field = str(envelope.input.get('field') or '').strip()
     if field not in PROJECT_FIELDS:
         raise invalid_argument(f'field is not writable: {field}')
+    if envelope.actor.type == 'agent' and field not in PROJECT_AGENT_FIELDS:
+        raise forbidden(f'agent cannot update field: {field}')
     _check_expected(project, envelope.expected or {})
     result = context.db_core.set_property(project['path'], field, envelope.input.get('value'), changed_by=f'{envelope.actor.type}:{envelope.actor.id or "unknown"}')
     if not result.get('ok'):
@@ -248,7 +264,7 @@ def project_update_field(envelope, context):
     return {'project': context.db_read.get_project(project['id']), 'write': result}
 
 
-@command('task.update_section', version=1, write=True, allowed_actors=('user', 'system', 'integration'), required_fields=('section', 'text'), reason_required=True)
+@command('task.update_section', version=1, write=True, allowed_actors=('user', 'agent', 'system', 'integration'), required_fields=('section', 'text'), reason_required=True)
 def task_update_section(envelope, context):
     task = _resolve_task(context, envelope.target)
     result = context.db_core.update_section(task['path'], envelope.input['section'], envelope.input['text'], changed_by=f'{envelope.actor.type}:{envelope.actor.id or "unknown"}')
@@ -257,7 +273,7 @@ def task_update_section(envelope, context):
     return {'task': context.db_read.get_task(task['id']), 'write': result}
 
 
-@command('project.update_section', version=1, write=True, allowed_actors=('user', 'system', 'integration'), required_fields=('section', 'text'), reason_required=True)
+@command('project.update_section', version=1, write=True, allowed_actors=('user', 'agent', 'system', 'integration'), required_fields=('section', 'text'), reason_required=True)
 def project_update_section(envelope, context):
     project = _resolve_project(context, envelope.target)
     result = context.db_core.update_section(project['path'], envelope.input['section'], envelope.input['text'], changed_by=f'{envelope.actor.type}:{envelope.actor.id or "unknown"}')
@@ -266,7 +282,7 @@ def project_update_section(envelope, context):
     return {'project': context.db_read.get_project(project['id']), 'write': result}
 
 
-@command('task.toggle_acceptance', version=1, write=True, allowed_actors=('user', 'system', 'integration'), required_fields=('index',), reason_required=True)
+@command('task.toggle_acceptance', version=1, write=True, allowed_actors=('user', 'agent', 'system', 'integration'), required_fields=('index',), reason_required=True)
 def task_toggle_acceptance(envelope, context):
     task = _resolve_task(context, envelope.target)
     result = context.db_core.toggle_ac(task['path'], int(envelope.input['index']), changed_by=f'{envelope.actor.type}:{envelope.actor.id or "unknown"}')
