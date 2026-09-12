@@ -128,7 +128,9 @@ def main():
 
     p = task_sub.add_parser('add-log')
     add_task_locator(p)
-    p.add_argument('--text', required=True)
+    p.add_argument('--summary', required=True)
+    p.add_argument('--type', default='manual')
+    p.add_argument('--date', default='')
     add_write_args(p)
 
     project = sub.add_parser('project')
@@ -211,7 +213,7 @@ def main():
         args.expected = {'status': args.expected_status} if args.expected_status else {}
         payload = build_execute(args, 'task.finish', task_target(args), write=True)
     elif args.resource == 'task' and args.action == 'add-log':
-        payload = build_execute(args, 'task.add_log', task_target(args), {'text': args.text}, write=True)
+        payload = build_execute(args, 'task.add_log', task_target(args), {'summary': args.summary, 'type': args.type, 'date': args.date}, write=True)
     elif args.resource == 'project' and args.action == 'get':
         target = {'project_id': args.project_id} if args.project_id else {'name': args.name}
         payload = build_execute(args, 'project.get', target)

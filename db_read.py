@@ -92,7 +92,7 @@ def _enrich_task(conn, task):
             ac_list.append({'text': line, 'done': False, 'failed': False})
     task['acceptance_criteria'] = ac_list
     
-    # 3. logs 从 DB 重建（YAML 格式字符串，供 plugin.js 解析）
+    # 3. logs 从 DB 重建为结构化列表
     log_entries = []
     for entry_row in conn.execute(
         'SELECT * FROM log_entries WHERE task_id=? ORDER BY date DESC', (task['id'],)
@@ -100,7 +100,7 @@ def _enrich_task(conn, task):
         entry = dict(entry_row)
         
         # 会话
-        entry['sessions'] = [dict(r) for r in conn.execute(
+        entry['sessions'] = [{'id': r['sid'], 'source': r['source']} for r in conn.execute(
             'SELECT sid, source FROM log_sessions WHERE entry_id=?', (entry['id'],)
         ).fetchall()]
         
@@ -117,45 +117,8 @@ def _enrich_task(conn, task):
         
         log_entries.append(entry)
     
-    # 重建 YAML 字符串（与现有 frontmatter logs_yaml 格式一致）
-    yaml_lines = []
-    for entry in log_entries:
-        yaml_lines.append(f'- date: {entry.get("date", "")}')
-        if entry.get('id'):
-            yaml_lines.append(f'  id: {entry["id"]}')
-        yaml_lines.append(f'  type: {entry.get("type", "manual")}')
-        summary = entry.get('summary', '')
-        if summary:
-            if '\n' in summary:
-                yaml_lines.append('  summary: |')
-                for sl in summary.split('\n'):
-                    yaml_lines.append(f'    {sl}')
-            else:
-                yaml_lines.append(f'  summary: {summary}')
-        if entry.get('window'):
-            yaml_lines.append(f'  window: "{entry["window"]}"')
-        if entry.get('sessions'):
-            yaml_lines.append('  sessions:')
-            for s in entry['sessions']:
-                yaml_lines.append(f'    - id: {s.get("sid", "")}')
-                if s.get('source'):
-                    yaml_lines.append(f'      source: {s["source"]}')
-        for kind in ('outputs', 'risks', 'pending'):
-            if entry.get(kind):
-                yaml_lines.append(f'  {kind}:')
-                for item in entry[kind]:
-                    yaml_lines.append(f'    - {item}')
-        if entry.get('decisions'):
-            yaml_lines.append('  decisions:')
-            for d in entry['decisions']:
-                yaml_lines.append(f'    - desc: {d.get("desc", "")}')
-                if d.get('by'):
-                    yaml_lines.append(f'      by: {d["by"]}')
-    
-    task['logs_yaml'] = '\n'.join(yaml_lines) if yaml_lines else ''
-    
-    # 4. logs（旧格式，供兼容）
-    task['logs'] = []
+    # 4. 结构化 logs（Codex UI / Agent 的规范格式）
+    task['logs'] = log_entries
     
     # 5. 补充 path 和 dir（plugin.js 依赖）
     # UUID 主键后：path 用 title（可改），dir 需要解析项目名

@@ -230,47 +230,39 @@ def render_task(task, session_ids, log_entries):
     lines.append('')
     lines.append('## 推进记录')
     
-    # YAML 推进记录
+    # 结构化推进记录 → 可读 Markdown
     if log_entries:
-        lines.append('```yaml')
         for entry in log_entries:
-            lines.append(f'- date: {entry.get("date", "")}')
-            if entry.get('id'):
-                lines.append(f'  id: {entry["id"]}')
-            lines.append(f'  type: {entry.get("type", "manual")}')
-            summary = entry.get('summary', '')
-            if summary:
-                if '\n' in summary:
-                    lines.append('  summary: |')
-                    for sl in summary.split('\n'):
-                        lines.append(f'    {sl}')
-                else:
-                    lines.append(f'  summary: {summary}')
+            lines.append(f'### {entry.get("date", "")} · {entry.get("type", "manual")}')
+            lines.append('')
+            lines.append(entry.get('summary', '') or '（无摘要）')
+            lines.append('')
             if entry.get('window'):
-                lines.append(f'  window: "{entry["window"]}"')
-            # sessions
+                lines.append(f'时间窗口：{entry["window"]}')
+                lines.append('')
             sessions = entry.get('sessions', [])
             if sessions:
-                lines.append('  sessions:')
-                for s in sessions:
-                    lines.append(f'    - id: {s.get("sid", "")}')
-                    if s.get('source'):
-                        lines.append(f'      source: {s["source"]}')
-            # outputs / risks / pending / decisions
-            for kind in ('outputs', 'risks', 'pending'):
+                lines.append('**关联会话**')
+                for session in sessions:
+                    sid = session.get('id') or session.get('sid', '')
+                    source = session.get('source', '')
+                    lines.append(f'- {sid}' + (f'（{source}）' if source else ''))
+                lines.append('')
+            for title, kind in (('产出', 'outputs'), ('注意', 'risks'), ('遗留', 'pending')):
                 items = entry.get(kind, [])
                 if items:
-                    lines.append(f'  {kind}:')
+                    lines.append(f'**{title}**')
                     for item in items:
-                        lines.append(f'    - {item}')
+                        lines.append(f'- {item}')
+                    lines.append('')
             decisions = entry.get('decisions', [])
             if decisions:
-                lines.append('  decisions:')
-                for d in decisions:
-                    lines.append(f'    - desc: {d.get("text", "")}')
-                    if d.get('by'):
-                        lines.append(f'      by: {d["by"]}')
-        lines.append('```')
+                lines.append('**关键决策**')
+                for decision in decisions:
+                    text = decision.get('text') or decision.get('desc', '')
+                    by = decision.get('by', '')
+                    lines.append(f'- {text}' + (f'（{by}）' if by else ''))
+                lines.append('')
     else:
         lines.append('- （暂无）')
     lines.append('')

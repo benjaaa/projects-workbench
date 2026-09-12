@@ -82,7 +82,7 @@ Agent 不暴露删除、创建项目和重命名等高风险命令。
 ```bash
 python3 wbctl.py describe
 python3 wbctl.py task get --task-id <task-id>
-python3 wbctl.py task add-log --task-id <task-id> --text "<progress>" \
+python3 wbctl.py task add-log --task-id <task-id> --summary "<progress>" \
   --idempotency-key "<stable-key>" --reason "task progress"
 python3 wbctl.py task finish --task-id <task-id> --expected-status In-Progress \
   --idempotency-key "<stable-key>" --reason "acceptance passed"
@@ -122,7 +122,7 @@ ln -s \
 - `goal`：任务目标
 - `acceptance_criteria`：验收标准
 - `task_detail`：任务详情
-- `logs_yaml`：任务跟进记录
+- `logs`：结构化任务跟进记录
 
 四项上下文全部读取后才允许开始执行。
 

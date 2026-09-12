@@ -25,7 +25,7 @@ Work Station 的任务工作台。SQLite 是唯一真相源，Markdown 是只读
 | 任务目标 | `goal` | 必须读取；不能只看任务标题或摘要 |
 | 验收标准 | `acceptance_criteria` | 必须读取全部条目、完成态和失败态 |
 | 任务详情 | `task_detail` | 必须完整读取，作为实际执行要求的主要依据 |
-| 任务跟进记录 | `logs_yaml` / `logs` | 必须读取；为空时明确记录为“无跟进记录”，不能跳过 |
+| 任务跟进记录 | `logs` | 必须读取；为空时明确记录为“无跟进记录”，不能跳过 |
 
 只有以上四项都完成读取后，才能开始执行。读取失败或字段缺失时停止并报告，不得依据 Markdown 投影自行补全上下文。
 
@@ -46,7 +46,7 @@ Work Station 的任务工作台。SQLite 是唯一真相源，Markdown 是只读
 | `project --name "<项目名>"` | 按名称读取项目详情 | 同上 |
 | `sessions --project "<项目名>"` | 读取项目关联会话 | `sessions` 列表，含 Codex/Hermes 来源、标题和活动时间 |
 
-读取任务详情后必须检查：`goal`、`task_detail`、`acceptance_criteria`、`logs_yaml`、`session_ids`、`project_id`、`path`、`repeat_*`。任务详情为空时报告信息不足，禁止读取 Markdown 补全。
+读取任务详情后必须检查：`goal`、`task_detail`、`acceptance_criteria`、`logs`、`session_ids`、`project_id`、`path`、`repeat_*`。任务详情为空时报告信息不足，禁止读取 Markdown 补全。
 
 ### 写入方法
 
@@ -60,7 +60,7 @@ Work Station 的任务工作台。SQLite 是唯一真相源，Markdown 是只读
 | `task update-status` | 更新任务状态 | `--task-id`、`--status`、`--expected-status` |
 | `task toggle-acceptance` | 切换验收项状态 | `--task-id`、`--index` |
 | `task update-section` | 更新目标或任务详情等区段 | `--task-id`、`--section`、`--text` |
-| `task add-log` | 追加推进记录 | `--task-id`、`--text` |
+| `task add-log` | 追加结构化推进记录 | `--task-id`、`--summary` |
 | `task finish` | 完成任务并处理周期任务 | `--task-id`、`--expected-status` |
 | `project update-field` | 更新项目安全字段 | `--project-id` 或 `--name`、`--field`、`--value` |
 | `project update-section` | 更新项目背景或目标 | `--project-id` 或 `--name`、`--section`、`--text` |
@@ -81,8 +81,8 @@ python3 ~/.hermes/profiles/business_analysis/desktop-plugins/projects-workbench/
 
 ### 场景 A：处理任务
 
-1. `read-db.py task <任务ID>` 读取完整详情，并确认 `goal`、`acceptance_criteria`、`task_detail`、`logs_yaml` 四项上下文都已读取。
-2. 检查 `logs_yaml`，如果存在等待/暂停要求，停止并报告。
+1. `read-db.py task <任务ID>` 读取完整详情，并确认 `goal`、`acceptance_criteria`、`task_detail`、`logs` 四项上下文都已读取。
+2. 检查 `logs`，如果存在等待/暂停要求，停止并报告。
 3. 必要时调用 `read-db.py project --name <项目名>` 和 `read-db.py sessions --project <项目名>` 补充项目上下文。
 4. 执行任务。
 5. 如用户要求记录推进：`wbctl task add-log`。
@@ -93,8 +93,8 @@ python3 ~/.hermes/profiles/business_analysis/desktop-plugins/projects-workbench/
 ### 场景 B：只写推进记录
 
 1. `read-db.py task <任务ID>`。
-2. `wbctl task add-log --task-id <ID> --text <记录> --idempotency-key <键> --reason <原因>`。
-3. `read-db.py task <任务ID>`，确认 `logs_yaml` 出现新记录。
+2. `wbctl task add-log --task-id <ID> --summary <记录> --idempotency-key <键> --reason <原因>`。
+3. `read-db.py task <任务ID>`，确认 `logs` 出现新记录。
 4. 不要顺手修改状态或验收。
 
 ### 场景 C：完成任务

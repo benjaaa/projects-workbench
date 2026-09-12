@@ -2,6 +2,7 @@ import os
 import re
 import sqlite3
 import time
+import uuid
 
 TASK_PATH_RE = re.compile(r'^2\. Project/2\.1 Project/([^/]+)/tasks/任务-(.+)\.md$')
 VAULT = os.environ.get('WORKBENCH_VAULT', '/Users/ben/Documents/Second Brain/Second Brain')
@@ -226,6 +227,73 @@ def update_draft_body(draft_id_or_title, body, changed_by=''):
     new_version = (row['version'] or 1) + 1
     conn.execute('UPDATE drafts SET body=?, updated_at=?, version=? WHERE id=?', (body, int(time.time()), new_version, draft_id))
     return {'ok': True, 'draft_id': draft_id, 'title': row['title'], 'old_body': old_body, 'version': new_version}
+
+
+def _insert_log_children(conn, entry_id, entry):
+    for session in entry.get('sessions') or []:
+        sid = str(session.get('id') or session.get('sid') or '').strip()
+        if sid:
+            conn.execute(
+                'INSERT OR IGNORE INTO log_sessions(entry_id, sid, source) VALUES(?,?,?)',
+                (entry_id, sid, session.get('source', '')),
+            )
+    for kind in ('outputs', 'risks', 'pending'):
+        for index, item in enumerate(entry.get(kind) or []):
+            conn.execute(
+                'INSERT INTO log_detail(entry_id, kind, seq, text) VALUES(?,?,?,?)',
+                (entry_id, kind, index, str(item)),
+            )
+    for index, decision in enumerate(entry.get('decisions') or []):
+        conn.execute(
+            'INSERT INTO log_detail(entry_id, kind, seq, text, by) VALUES(?,?,?,?,?)',
+            (entry_id, 'decisions', index, decision.get('desc', decision.get('text', '')), decision.get('by', '')),
+        )
+
+
+def _bump_task_version(conn, task_id):
+    row = conn.execute('SELECT version FROM tasks WHERE id=?', (task_id,)).fetchone()
+    if not row:
+        return None
+    version = (row['version'] or 1) + 1
+    conn.execute('UPDATE tasks SET version=?, updated_at=? WHERE id=?', (version, int(time.time()), task_id))
+    return version
+
+
+def create_task_log(task_id, entry):
+    from db_transaction import current_transaction
+    active = current_transaction()
+    if not active:
+        return {'ok': False, 'error': 'task.add_log requires a domain transaction'}
+    conn = active.connection
+    entry_id = str(entry.get('id') or uuid.uuid4().hex[:12])
+    now = int(time.time())
+    conn.execute(
+        'INSERT INTO log_entries(id, task_id, date, type, summary, window, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?)',
+        (entry_id, task_id, entry.get('date', ''), entry.get('type', 'manual'), entry.get('summary', ''), entry.get('window', ''), now, now),
+    )
+    _insert_log_children(conn, entry_id, entry)
+    version = _bump_task_version(conn, task_id)
+    return {'ok': True, 'entry_id': entry_id, 'version': version}
+
+
+def update_task_log(task_id, entry_id, entry):
+    from db_transaction import current_transaction
+    active = current_transaction()
+    if not active:
+        return {'ok': False, 'error': 'log.edit_entry requires a domain transaction'}
+    conn = active.connection
+    row = conn.execute('SELECT id FROM log_entries WHERE id=? AND task_id=?', (entry_id, task_id)).fetchone()
+    if not row:
+        return {'ok': False, 'error': f'log entry not found: {entry_id}'}
+    conn.execute(
+        'UPDATE log_entries SET date=?, type=?, summary=?, window=?, updated_at=? WHERE id=?',
+        (entry.get('date', ''), entry.get('type', 'manual'), entry.get('summary', ''), entry.get('window', ''), int(time.time()), entry_id),
+    )
+    conn.execute('DELETE FROM log_detail WHERE entry_id=?', (entry_id,))
+    conn.execute('DELETE FROM log_sessions WHERE entry_id=?', (entry_id,))
+    _insert_log_children(conn, entry_id, entry)
+    version = _bump_task_version(conn, task_id)
+    return {'ok': True, 'entry_id': entry_id, 'version': version}
 
 
 def session_counts(db_path):

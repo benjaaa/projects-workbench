@@ -78,12 +78,14 @@ class FakeCore:
         self.calls.append(('delete_draft', draft_id, changed_by))
         return {'ok': True, 'db_deleted': True, 'file_deleted': True}
 
+    def _validate_sids(self, sids):
+        return None
+
 
 class SlowCore(FakeCore):
-    def add_log(self, path, text, changed_by=''):
-        self.calls.append(('add_log', path, text, changed_by))
+    def _validate_sids(self, sids):
         time.sleep(0.15)
-        return {'ok': True, 'version': 3}
+        return None
 
 
 class FailingCore(FakeCore):
@@ -103,6 +105,16 @@ class DomainServiceTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.NamedTemporaryFile(suffix='.db', delete=False)
         self.temp.close()
+        conn = sqlite3.connect(self.temp.name)
+        try:
+            conn.execute('CREATE TABLE tasks (id TEXT PRIMARY KEY, version INTEGER, updated_at INTEGER)')
+            conn.execute('CREATE TABLE log_entries (id TEXT PRIMARY KEY, task_id TEXT, date TEXT, type TEXT, summary TEXT, window TEXT, created_at INTEGER, updated_at INTEGER)')
+            conn.execute('CREATE TABLE log_sessions (entry_id TEXT, sid TEXT, source TEXT)')
+            conn.execute('CREATE TABLE log_detail (entry_id TEXT, kind TEXT, seq INTEGER, text TEXT, by TEXT)')
+            conn.execute('INSERT INTO tasks(id, version, updated_at) VALUES(?,?,?)', ('task-1', 1, 0))
+            conn.commit()
+        finally:
+            conn.close()
         self.core = FakeCore()
         self.service = DomainService(self.temp.name, core=self.core, reader=FakeReader())
 
@@ -133,23 +145,49 @@ class DomainServiceTest(unittest.TestCase):
         self.assertIn('session.counts', names)
 
     def test_agent_write_requires_idempotency_key(self):
-        result = self.service.execute(self.payload('task.add_log', {'text': 'test'}))
+        result = self.service.execute(self.payload('task.add_log', {'summary': 'test'}))
         self.assertFalse(result['ok'])
         self.assertEqual(result['error']['code'], 'INVALID_ARGUMENT')
         self.assertEqual(self.core.calls, [])
 
     def test_agent_write_is_idempotent(self):
-        payload = self.payload('task.add_log', {'text': 'test'}, idem='task-1:test')
+        payload = self.payload('task.add_log', {'summary': 'test'}, idem='task-1:test')
         first = self.service.execute(payload)
         second = self.service.execute(payload)
         self.assertTrue(first['ok'])
         self.assertTrue(second['ok'])
         self.assertTrue(second.get('replayed'))
-        self.assertEqual(len([call for call in self.core.calls if call[0] == 'add_log']), 1)
+        conn = sqlite3.connect(self.temp.name)
+        try:
+            count = conn.execute('SELECT COUNT(*) FROM log_entries').fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(count, 1)
+
+    def test_structured_log_details_are_written(self):
+        payload = self.payload('task.add_log', {
+            'summary': 'Structured progress',
+            'sessions': [{'id': 'codex:t1', 'source': 'codex'}],
+            'outputs': ['report.md'],
+            'risks': ['risk one'],
+            'pending': ['pending one'],
+            'decisions': [{'desc': 'keep going', 'by': 'ben'}],
+        }, idem='structured-log-1')
+        result = self.service.execute(payload)
+        self.assertTrue(result['ok'])
+        conn = sqlite3.connect(self.temp.name)
+        try:
+            entry_id = conn.execute('SELECT id FROM log_entries').fetchone()[0]
+            session_count = conn.execute('SELECT COUNT(*) FROM log_sessions WHERE entry_id=?', (entry_id,)).fetchone()[0]
+            detail_count = conn.execute('SELECT COUNT(*) FROM log_detail WHERE entry_id=?', (entry_id,)).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(session_count, 1)
+        self.assertEqual(detail_count, 4)
 
     def test_concurrent_same_idempotency_key_executes_once(self):
         core = SlowCore()
-        payload = self.payload('task.add_log', {'text': 'race'}, idem='race-key')
+        payload = self.payload('task.add_log', {'summary': 'race', 'sessions': [{'id': 's1', 'source': 'codex'}]}, idem='race-key')
         barrier = threading.Barrier(2)
         results = []
 
@@ -167,7 +205,12 @@ class DomainServiceTest(unittest.TestCase):
         self.assertEqual(len(results), 2)
         self.assertTrue(all(result['ok'] for result in results))
         self.assertEqual(sum(1 for result in results if result.get('replayed')), 1)
-        self.assertEqual(len([call for call in core.calls if call[0] == 'add_log']), 1)
+        conn = sqlite3.connect(self.temp.name)
+        try:
+            count = conn.execute('SELECT COUNT(*) FROM log_entries').fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(count, 1)
 
     def test_failed_write_rolls_back_business_effect_and_audit(self):
         TASK['repeat_mode'] = 'fixed'

@@ -1,3 +1,4 @@
+import time
 from .errors import conflict, forbidden, invalid_argument, invalid_transition, not_found
 from .registry import command
 
@@ -12,6 +13,37 @@ def _require_value(value, name):
     if value is None or str(value).strip() == '':
         raise invalid_argument(f'{name} is required')
     return value
+
+
+def _normalize_log_entry(data):
+    data = data or {}
+    summary = _require_value(data.get('summary'), 'input.summary')
+    sessions = []
+    for item in data.get('sessions') or []:
+        if isinstance(item, str):
+            sessions.append({'id': item.strip(), 'source': ''})
+        elif isinstance(item, dict):
+            sid = str(item.get('id') or item.get('sid') or '').strip()
+            if sid:
+                sessions.append({'id': sid, 'source': str(item.get('source') or '')})
+    decisions = []
+    for item in data.get('decisions') or []:
+        if isinstance(item, str):
+            decisions.append({'desc': item, 'by': ''})
+        elif isinstance(item, dict):
+            decisions.append({'desc': str(item.get('desc') or item.get('text') or ''), 'by': str(item.get('by') or '')})
+    return {
+        'id': str(data.get('id') or ''),
+        'date': str(data.get('date') or time.strftime('%m-%d %H:%M:%S')),
+        'type': str(data.get('type') or 'manual'),
+        'summary': str(summary),
+        'window': str(data.get('window') or ''),
+        'sessions': sessions,
+        'outputs': [str(value) for value in (data.get('outputs') or [])],
+        'risks': [str(value) for value in (data.get('risks') or [])],
+        'pending': [str(value) for value in (data.get('pending') or [])],
+        'decisions': decisions,
+    }
 
 
 def _resolve_task(context, target):
@@ -254,18 +286,21 @@ def task_finish(envelope, context):
     return {'task': context.db_read.get_task(task['id']), 'next_task': next_task, 'write': result}
 
 
-@command('task.add_log', version=1, write=True, allowed_actors=('agent', 'user', 'system'), required_fields=('text',), reason_required=True)
+@command('task.add_log', version=1, write=True, allowed_actors=('agent', 'user', 'system'), required_fields=('summary',), reason_required=True)
 def task_add_log(envelope, context):
     task = _resolve_task(context, envelope.target)
-    text = _require_value(envelope.input.get('text'), 'input.text')
-    result = context.db_core.add_log(
-        task['path'],
-        text,
-        changed_by=f'{envelope.actor.type}:{envelope.actor.id or "unknown"}',
-    )
+    changed_by = f'{envelope.actor.type}:{envelope.actor.id or "unknown"}'
+    entry = _normalize_log_entry(envelope.input)
+    sids = [item['id'] for item in entry['sessions'] if item.get('id')]
+    dead = context.db_core._validate_sids(sids) if sids else None
+    if dead:
+        raise invalid_argument(f'INVALID_SESSION_IDS: {dead}')
+    result = context.repositories.create_task_log(task['id'], entry)
     if not result.get('ok'):
         raise conflict(result.get('error') or 'task.add_log failed')
-    return {'task': context.db_read.get_task(task['id']), 'write': result}
+    context.db_core._log_change('task', task['id'], 'log_entries', None, result['entry_id'], changed_by)
+    render_result = context.db_core._trigger_render('task', task['id'])
+    return {'task': context.db_read.get_task(task['id']), 'entry_id': result['entry_id'], 'write': {**result, **render_result}}
 
 
 @command('session.link', version=1, write=True, allowed_actors=('agent', 'user', 'system'), required_fields=('sid',), reason_required=True)
@@ -439,18 +474,21 @@ def task_repeat_next(envelope, context):
     return result
 
 
-@command('log.edit_entry', version=1, write=True, allowed_actors=('user', 'system', 'integration'), required_fields=('entry_id', 'yaml_text'), reason_required=True)
+@command('log.edit_entry', version=1, write=True, allowed_actors=('user', 'system', 'integration'), required_fields=('entry_id', 'summary'), reason_required=True)
 def log_edit_entry(envelope, context):
     task = _resolve_task(context, envelope.target)
-    result = context.db_core.edit_yaml_log(
-        task['path'],
-        envelope.input['entry_id'],
-        envelope.input['yaml_text'],
-        changed_by=f'{envelope.actor.type}:{envelope.actor.id or "unknown"}',
-    )
+    changed_by = f'{envelope.actor.type}:{envelope.actor.id or "unknown"}'
+    entry = _normalize_log_entry(envelope.input)
+    sids = [item['id'] for item in entry['sessions'] if item.get('id')]
+    dead = context.db_core._validate_sids(sids) if sids else None
+    if dead:
+        raise invalid_argument(f'INVALID_SESSION_IDS: {dead}')
+    result = context.repositories.update_task_log(task['id'], envelope.input['entry_id'], entry)
     if not result.get('ok'):
         raise conflict(result.get('error') or 'log.edit_entry failed')
-    return result
+    context.db_core._log_change('task', task['id'], 'log_entries', envelope.input['entry_id'], 'updated', changed_by)
+    render_result = context.db_core._trigger_render('task', task['id'])
+    return {'task': context.db_read.get_task(task['id']), 'entry_id': result['entry_id'], 'write': {**result, **render_result}}
 
 
 @command('ops.log', version=1, write=True, allowed_actors=('user', 'system', 'integration'), required_fields=('action',), reason_required=True)
