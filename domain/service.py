@@ -6,6 +6,7 @@ import db_read
 from db_transaction import transaction
 from . import handlers  # noqa: F401 - registers command handlers
 from . import repositories
+from . import review  # noqa: F401 - registers review commands
 from .errors import DomainError, forbidden, invalid_argument
 from .models import Actor, CommandEnvelope, CommandResponse, new_id
 from .registry import registry

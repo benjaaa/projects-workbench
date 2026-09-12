@@ -42,6 +42,7 @@ def _normalize_log_entry(data):
         'outputs': [str(value) for value in (data.get('outputs') or [])],
         'risks': [str(value) for value in (data.get('risks') or [])],
         'pending': [str(value) for value in (data.get('pending') or [])],
+        'method': [str(value) for value in (data.get('method') or [])],
         'decisions': decisions,
     }
 

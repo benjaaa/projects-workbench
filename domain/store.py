@@ -52,6 +52,31 @@ class CommandStore:
                 result_json TEXT NOT NULL,
                 created_at INTEGER NOT NULL
             )''')
+            conn.execute('''CREATE TABLE IF NOT EXISTS review_runs (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                window_start INTEGER NOT NULL,
+                window_end INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                entry_id TEXT DEFAULT '',
+                command_id TEXT DEFAULT '',
+                coverage_json TEXT DEFAULT '{}',
+                created_at INTEGER,
+                reviewed_at INTEGER,
+                UNIQUE(task_id, window_start, window_end)
+            )''')
+            conn.execute('''CREATE TABLE IF NOT EXISTS review_session_results (
+                run_id TEXT NOT NULL REFERENCES review_runs(id) ON DELETE CASCADE,
+                sid TEXT NOT NULL,
+                status TEXT NOT NULL,
+                archived INTEGER DEFAULT 0,
+                updated_at INTEGER DEFAULT 0,
+                digest_json TEXT DEFAULT '{}',
+                coverage_json TEXT DEFAULT '{}',
+                created_at INTEGER,
+                PRIMARY KEY (run_id, sid)
+            )''')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_review_runs_task_window ON review_runs(task_id, window_end DESC)')
             conn.commit()
         finally:
             conn.close()

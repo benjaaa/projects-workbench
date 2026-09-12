@@ -105,7 +105,7 @@ def _enrich_task(conn, task):
         ).fetchall()]
         
         # 明细
-        for kind in ('outputs', 'risks', 'pending', 'decisions'):
+        for kind in ('outputs', 'risks', 'pending', 'decisions', 'method'):
             rows = conn.execute(
                 'SELECT text, by FROM log_detail WHERE entry_id=? AND kind=? ORDER BY seq',
                 (entry['id'], kind)

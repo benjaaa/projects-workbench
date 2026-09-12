@@ -263,6 +263,12 @@ def render_task(task, session_ids, log_entries):
                     by = decision.get('by', '')
                     lines.append(f'- {text}' + (f'（{by}）' if by else ''))
                 lines.append('')
+            methods = entry.get('method', [])
+            if methods:
+                lines.append('**实现方法**')
+                for item in methods:
+                    lines.append(f'- {item}')
+                lines.append('')
     else:
         lines.append('- （暂无）')
     lines.append('')
@@ -401,7 +407,7 @@ def build_task_render_args(conn, task_id):
         ).fetchall()]
         
         # 明细（outputs / risks / pending / decisions）
-        for kind in ('outputs', 'risks', 'pending', 'decisions'):
+        for kind in ('outputs', 'risks', 'pending', 'decisions', 'method'):
             rows = conn.execute(
                 'SELECT text, by FROM log_detail WHERE entry_id=? AND kind=? ORDER BY seq',
                 (entry['id'], kind)

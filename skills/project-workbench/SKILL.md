@@ -46,6 +46,13 @@ Work Station 的任务工作台。SQLite 是唯一真相源，Markdown 是只读
 | `project --name "<项目名>"` | 按名称读取项目详情 | 同上 |
 | `sessions --project "<项目名>"` | 读取项目关联会话 | `sessions` 列表，含 Codex/Hermes 来源、标题和活动时间 |
 
+Codex 回顾读取方法统一使用 `wbctl.py`：
+
+| 方法 | 作用 | 返回值 |
+|---|---|---|
+| `review due --window-end "<时间戳>"` | 找出窗口内有关联会话更新的任务 | `tasks` 列表，含每个任务的真实回顾窗口和命中会话 |
+| `review prepare --task-id "<ID>" --window-start "<时间戳>" --window-end "<时间戳>"` | 读取并规范化任务关联的 Codex session | `sessions`、`skipped_sessions`、`coverage` 和 `run_id` |
+
 读取任务详情后必须检查：`goal`、`task_detail`、`acceptance_criteria`、`logs`、`session_ids`、`project_id`、`path`、`repeat_*`。任务详情为空时报告信息不足，禁止读取 Markdown 补全。
 
 ### 写入方法
@@ -66,6 +73,7 @@ Work Station 的任务工作台。SQLite 是唯一真相源，Markdown 是只读
 | `project update-section` | 更新项目背景或目标 | `--project-id` 或 `--name`、`--section`、`--text` |
 | `session link` | 绑定任务与会话 | `--task-id`、`--sid`、`--source` |
 | `projection render` | 手动刷新投影 | `--task-id` 或 `--project-id` 或 `--path` |
+| `review commit` | 写入一个任务级回顾 | `--task-id`、`--run-id`、`--window-start`、`--window-end`、`--payload-json` |
 
 命令目录和权限矩阵的权威来源：
 
@@ -156,6 +164,20 @@ Draft 预填格式：`处理 Draft -- Draft 名称：<标题>（Draft ID：<id>�
 1. 不要重新生成幂等键。
 2. 使用第一次调用相同的 `--idempotency-key` 重试。
 3. 读取目标实体验证最终状态；如果返回 `replayed=true`，说明没有重复写入。
+
+### 场景 K：每日回顾与补跑
+
+回顾的原始记录粒度是 Codex session，写入粒度是任务。session 只产生 digest，只有最终任务级归并允许写推进记录。
+
+1. 调用 `wbctl review due --window-end <当前时间戳>`，取得有关联会话更新的任务。
+2. 对每个到期任务调用 `wbctl review prepare --task-id <ID> --window-start <start> --window-end <end>`。
+3. `review prepare` 已过滤系统提示、AGENTS.md、Skill/MCP 注入、工具调用、工具结果和中间 Agent 消息；归档 session 正常参与。
+4. 对每个 session 分别形成 `SessionDigest`，不得直接写任务推进记录。Digest 至少包含摘要、产出、未决事项、风险和实现方法。
+5. 最终任务级归并只执行一次，输入是该任务全部 `SessionDigest`，输出一份 `TaskReview`。
+6. 归并优先级：摘要；产出与未决事项；关键决策与风险；实现方法。实现方法以 reasoning summary、产物和最终回答为依据，不臆造完整思维链。
+7. 调用 `wbctl review commit` 写入 `TaskReview`。`session_digests` 包含本窗口实际处理的全部 session，`coverage` 原样传入。
+8. 再次读取任务，验证新 `logs`、`window`、`sessions`、`outputs`、`pending` 和 `method`。
+9. 如果 `review commit` 返回 `status=partial`，该窗口不会推进 cursor；修复读取问题后使用同一个 `run_id` 和新幂等键重试。
 
 ## 汇报格式
 

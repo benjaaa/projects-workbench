@@ -56,6 +56,16 @@ def add_write_args(parser):
     parser.add_argument('--reason', required=True)
 
 
+def parse_json_object(value, name):
+    try:
+        parsed = json.loads(value)
+    except Exception as error:
+        raise ValueError(f'{name} must be valid JSON: {error}')
+    if not isinstance(parsed, dict):
+        raise ValueError(f'{name} must be a JSON object')
+    return parsed
+
+
 def add_task_locator(parser):
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument('--task-id')
@@ -190,6 +200,26 @@ def main():
     p = session_sub.add_parser('codex-titles')
     p.add_argument('--ids', required=True, help='comma-separated Codex thread ids')
 
+    review = sub.add_parser('review')
+    review_sub = review.add_subparsers(dest='action', required=True)
+    p = review_sub.add_parser('due')
+    p.add_argument('--window-end', default='')
+    p.add_argument('--limit', type=int, default=200)
+
+    p = review_sub.add_parser('prepare')
+    add_task_locator(p)
+    p.add_argument('--window-start', default='')
+    p.add_argument('--window-end', default='')
+    p.add_argument('--max-text-chars', type=int, default=40000)
+
+    p = review_sub.add_parser('commit')
+    add_task_locator(p)
+    p.add_argument('--run-id', required=True)
+    p.add_argument('--window-start', required=True)
+    p.add_argument('--window-end', required=True)
+    p.add_argument('--payload-json', required=True, help='task-level merged review JSON object')
+    add_write_args(p)
+
     args = parser.parse_args()
     service = DomainService(os.path.join(SCRIPT_DIR, 'workbench.db'))
 
@@ -244,6 +274,28 @@ def main():
     elif args.resource == 'session' and args.action == 'codex-titles':
         ids = [value.strip() for value in args.ids.split(',') if value.strip()]
         payload = build_execute(args, 'session.codex_titles', input_data={'ids': ids})
+    elif args.resource == 'review' and args.action == 'due':
+        payload = build_execute(args, 'review.due', input_data={
+            'window_end': args.window_end,
+            'limit': args.limit,
+        })
+    elif args.resource == 'review' and args.action == 'prepare':
+        payload = build_execute(args, 'review.prepare', task_target(args), {
+            'window_start': args.window_start,
+            'window_end': args.window_end,
+            'max_text_chars': args.max_text_chars,
+        })
+    elif args.resource == 'review' and args.action == 'commit':
+        try:
+            input_data = parse_json_object(args.payload_json, 'payload-json')
+        except ValueError as error:
+            return output({'ok': False, 'error': {'code': 'INVALID_ARGUMENT', 'message': str(error)}})
+        input_data.update({
+            'run_id': args.run_id,
+            'window_start': args.window_start,
+            'window_end': args.window_end,
+        })
+        payload = build_execute(args, 'review.commit', task_target(args), input_data, write=True)
     else:
         return output({'ok': False, 'error': {'code': 'INVALID_COMMAND', 'message': 'unsupported command'}})
 

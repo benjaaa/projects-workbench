@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import sqlite3
@@ -127,6 +128,96 @@ def _session_dict(row):
     }
 
 
+def list_task_session_links(db_path, task_id):
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            'SELECT sid, source, linked_at FROM task_sessions WHERE task_id=? ORDER BY linked_at',
+            (task_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def latest_completed_review(db_path, task_id):
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            '''SELECT * FROM review_runs
+               WHERE task_id=? AND status='completed'
+               ORDER BY window_end DESC LIMIT 1''',
+            (task_id,),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def get_review_run(db_path, run_id):
+    conn = _connect(db_path)
+    try:
+        row = conn.execute('SELECT * FROM review_runs WHERE id=?', (run_id,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def upsert_review_run(run_id, task_id, window_start, window_end, status, entry_id, command_id, coverage):
+    from db_transaction import current_transaction
+    active = current_transaction()
+    if not active:
+        return {'ok': False, 'error': 'review.commit requires a domain transaction'}
+    conn = active.connection
+    now = int(time.time())
+    payload = json.dumps(coverage or {}, ensure_ascii=False, separators=(',', ':'))
+    conn.execute(
+        '''INSERT INTO review_runs(
+               id, task_id, window_start, window_end, status, entry_id,
+               command_id, coverage_json, created_at, reviewed_at
+           ) VALUES(?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(id) DO UPDATE SET
+               status=excluded.status,
+               entry_id=excluded.entry_id,
+               command_id=excluded.command_id,
+               coverage_json=excluded.coverage_json,
+               reviewed_at=excluded.reviewed_at''',
+        (run_id, task_id, int(window_start), int(window_end), status, entry_id, command_id, payload, now, now),
+    )
+    return {'ok': True, 'run_id': run_id, 'status': status}
+
+
+def replace_review_session_results(run_id, session_digests):
+    from db_transaction import current_transaction
+    active = current_transaction()
+    if not active:
+        return {'ok': False, 'error': 'review.commit requires a domain transaction'}
+    conn = active.connection
+    conn.execute('DELETE FROM review_session_results WHERE run_id=?', (run_id,))
+    now = int(time.time())
+    for digest in session_digests or []:
+        sid = str(digest.get('session_id') or digest.get('sid') or '').strip()
+        if not sid:
+            continue
+        conn.execute(
+            '''INSERT INTO review_session_results(
+                   run_id, sid, status, archived, updated_at, digest_json,
+                   coverage_json, created_at
+               ) VALUES(?,?,?,?,?,?,?,?)''',
+            (
+                run_id,
+                sid,
+                str(digest.get('status') or 'completed'),
+                1 if digest.get('archived') else 0,
+                int(digest.get('updated_at') or 0),
+                json.dumps(digest, ensure_ascii=False, separators=(',', ':')),
+                json.dumps(digest.get('coverage') or {}, ensure_ascii=False, separators=(',', ':')),
+                now,
+            ),
+        )
+    return {'ok': True, 'count': len(session_digests or [])}
+
+
 def list_project_sessions(db_path, project_id='', project_name=''):
     wb = _connect(db_path)
     try:
@@ -243,6 +334,11 @@ def _insert_log_children(conn, entry_id, entry):
                 'INSERT INTO log_detail(entry_id, kind, seq, text) VALUES(?,?,?,?)',
                 (entry_id, kind, index, str(item)),
             )
+    for index, item in enumerate(entry.get('method') or []):
+        conn.execute(
+            'INSERT INTO log_detail(entry_id, kind, seq, text) VALUES(?,?,?,?)',
+            (entry_id, 'method', index, str(item)),
+        )
     for index, decision in enumerate(entry.get('decisions') or []):
         conn.execute(
             'INSERT INTO log_detail(entry_id, kind, seq, text, by) VALUES(?,?,?,?,?)',

@@ -103,6 +103,32 @@ CREATE TABLE IF NOT EXISTS log_sessions (
     PRIMARY KEY (entry_id, sid)
 );
 
+CREATE TABLE IF NOT EXISTS review_runs (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    window_start INTEGER NOT NULL,
+    window_end INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    entry_id TEXT DEFAULT '',
+    command_id TEXT DEFAULT '',
+    coverage_json TEXT DEFAULT '{}',
+    created_at INTEGER,
+    reviewed_at INTEGER,
+    UNIQUE(task_id, window_start, window_end)
+);
+
+CREATE TABLE IF NOT EXISTS review_session_results (
+    run_id TEXT NOT NULL REFERENCES review_runs(id) ON DELETE CASCADE,
+    sid TEXT NOT NULL,
+    status TEXT NOT NULL,
+    archived INTEGER DEFAULT 0,
+    updated_at INTEGER DEFAULT 0,
+    digest_json TEXT DEFAULT '{}',
+    coverage_json TEXT DEFAULT '{}',
+    created_at INTEGER,
+    PRIMARY KEY (run_id, sid)
+);
+
 -- 文档映射表（Ben 2026-09-04 拍板：全量映射）
 -- entity_type: project|task = 实体主文档（生成器管理版本）
 --              file   = 项目目录内其他文件（name+path 映射）
@@ -121,6 +147,7 @@ CREATE TABLE IF NOT EXISTS documents (
 
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
 CREATE INDEX IF NOT EXISTS idx_task_sessions_task ON task_sessions(task_id);
+CREATE INDEX IF NOT EXISTS idx_review_runs_task_window ON review_runs(task_id, window_end DESC);
 CREATE INDEX IF NOT EXISTS idx_log_entries_task ON log_entries(task_id);
 CREATE INDEX IF NOT EXISTS idx_documents_path ON documents(path);
 """

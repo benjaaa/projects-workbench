@@ -71,6 +71,7 @@ task.get / task.list / task.update_field / task.add_log / task.finish
 project.get / project.list / project.update_field
 draft.list / draft.get / draft.create / draft.convert / draft.update / draft.delete
 session.link / session.unlink / session.list_for_project / session.counts
+review.due / review.prepare / review.commit
 kanban.status / kanban.create / kanban.complete / kanban.dispatch
 workbench.snapshot / system.describe
 ```
@@ -87,6 +88,11 @@ python3 wbctl.py task add-log --task-id <task-id> --summary "<progress>" \
 python3 wbctl.py task finish --task-id <task-id> --expected-status In-Progress \
   --idempotency-key "<stable-key>" --reason "acceptance passed"
 python3 wbctl.py session list-for-project --name "<project>"
+python3 wbctl.py review due --window-end "<unix-seconds>"
+python3 wbctl.py review prepare --task-id <task-id> --window-start "<unix-seconds>" --window-end "<unix-seconds>"
+python3 wbctl.py review commit --task-id <task-id> --run-id <run-id> \
+  --window-start "<unix-seconds>" --window-end "<unix-seconds>" \
+  --payload-json '<TaskReview JSON>' --idempotency-key "<stable-key>" --reason "daily review"
 ```
 
 读写链路：
@@ -125,6 +131,35 @@ ln -s \
 - `logs`：结构化任务跟进记录
 
 四项上下文全部读取后才允许开始执行。
+
+## 每日回顾链路
+
+```text
+18:00 trigger
+  -> review.due
+  -> review.prepare
+  -> CodexSessionReader
+  -> per-session SessionDigest
+  -> one task-level TaskReview merge
+  -> review.commit
+  -> review_runs cursor
+```
+
+规则：
+
+1. Codex session 是读取粒度，任务推进记录是写入粒度。
+2. 先用 `threads.updated_at` 过滤窗口内未更新的 session，再读取 rollout。
+3. 归档 session 正常参与，不按归档状态过滤。
+4. 系统提示、AGENTS.md、Skill/MCP 注入、工具调用、工具结果和中间 Agent 消息不进入主上下文。
+5. 完整 final 回答以 `task_complete.last_agent_message` 为准；中断轮次标记为 interrupted。
+6. reasoning summary 可作为实现方法依据，但不能当作完整思维链。
+7. session 级不写任务推进记录；最终归并 Agent 唯一写入。
+8. `review.commit` 原子写 `log_entries`、`log_detail`、`log_sessions`、`review_runs` 和 session digest。
+9. `partial` 不推进 cursor，修复后使用同一窗口重试。
+
+定时入口使用 Codex Automation，每个运行周期执行一次全局 `review.due` 扫描。Automation 只负责触发；补跑和幂等由 `review_runs` 控制，不依赖调度器准时执行。
+
+当前本地 Automation：`work-station`，每天 18:00 运行。
 
 ## 数据与事务
 
