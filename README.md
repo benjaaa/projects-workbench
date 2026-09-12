@@ -1,5 +1,10 @@
 # projects-workbench
 
+> Deprecated for distribution. The canonical one-repository distribution now lives in
+> [codex-workstation](https://github.com/benjaaa/codex-workstation), under `workbench/`.
+> New installs and releases should use `codex-workstation`; this repository remains only
+> as the historical domain-service development copy.
+
 Work Station 的本地数据与领域命令服务。SQLite 是唯一真相源，Markdown/vault 是只读投影；UI、Agent CLI、MCP 和 Codex skill 通过同一套领域命令读写业务数据。
 
 ## 架构
